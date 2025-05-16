@@ -4,24 +4,27 @@ package parser
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"wx-yz/lightfoot/lexer"
 )
 
 // Precedence levels for operators
 const (
-	_ int = iota
-	Lowest
-	Equals       // ==
-	LessGreater  // > or <
-	Sum          // +
-	Product      // *
-	Prefix       // -X or !X
-	Call         // myFunction(X)
-	Index        // array[index]
-	MemberAccess // object.field or module:function
+	_            int = iota // 0
+	Lowest                  // 1
+	Assignment              // 2 =
+	Equals                  // 3 ==, !=
+	LessGreater             // 4 >, <, >=, <=
+	Sum                     // 5 +, -
+	Product                 // 6 *, /
+	Prefix                  // 7 (Not used by infix, for potential prefix ops)
+	Call                    // 8 myFunction(X)
+	MemberAccess            // 9 module:function or object.field
 )
 
+// precedences maps token types to their precedence levels.
 var precedences = map[lexer.TokenType]int{
+	lexer.TokenEqual:              Assignment,
 	lexer.TokenEqualEqual:         Equals,
 	lexer.TokenNotEqual:           Equals,
 	lexer.TokenLessThan:           LessGreater,
@@ -32,30 +35,25 @@ var precedences = map[lexer.TokenType]int{
 	lexer.TokenMinus:              Sum,
 	lexer.TokenSlash:              Product,
 	lexer.TokenAsterisk:           Product,
-	lexer.TokenLParen:             Call,         // For call expressions
-	lexer.TokenColon:              MemberAccess, // For qualified identifiers like io:println
-	lexer.TokenDot:                MemberAccess, // For future field access
+	lexer.TokenLParen:             Call,
+	lexer.TokenColon:              MemberAccess,
+	lexer.TokenDot:                MemberAccess,
 }
 
-// Parser holds the state of the parser.
 type Parser struct {
-	l      *lexer.Lexer // Kept for error reporting with line/col if needed directly
 	tokens []lexer.Token
-	pos    int // current token position
-
+	pos    int
 	errors []string
 
-	// Prefix and infix parsing functions
 	prefixParseFns map[lexer.TokenType]prefixParseFn
 	infixParseFns  map[lexer.TokenType]infixParseFn
 }
 
 type (
 	prefixParseFn func() Expression
-	infixParseFn  func(Expression) Expression // Takes the left expression as argument
+	infixParseFn  func(Expression) Expression
 )
 
-// NewParser creates a new Parser.
 func NewParser(tokens []lexer.Token) *Parser {
 	p := &Parser{
 		tokens: tokens,
@@ -68,9 +66,9 @@ func NewParser(tokens []lexer.Token) *Parser {
 	p.registerPrefix(lexer.TokenStringLiteral, p.parseStringLiteral)
 	p.registerPrefix(lexer.TokenBooleanLiteral, p.parseBooleanLiteral)
 	p.registerPrefix(lexer.TokenLParen, p.parseGroupedExpression)
-	// Add prefix operators if any (e.g., !, -)
 
 	p.infixParseFns = make(map[lexer.TokenType]infixParseFn)
+	p.registerInfix(lexer.TokenEqual, p.parseAssignmentExpression)
 	p.registerInfix(lexer.TokenPlus, p.parseInfixExpression)
 	p.registerInfix(lexer.TokenMinus, p.parseInfixExpression)
 	p.registerInfix(lexer.TokenSlash, p.parseInfixExpression)
@@ -81,57 +79,50 @@ func NewParser(tokens []lexer.Token) *Parser {
 	p.registerInfix(lexer.TokenLessThanOrEqual, p.parseInfixExpression)
 	p.registerInfix(lexer.TokenGreaterThan, p.parseInfixExpression)
 	p.registerInfix(lexer.TokenGreaterThanOrEqual, p.parseInfixExpression)
-	p.registerInfix(lexer.TokenLParen, p.parseCallExpression)        // For function calls
-	p.registerInfix(lexer.TokenColon, p.parseMemberAccessExpression) // For module:function
+	p.registerInfix(lexer.TokenLParen, p.parseCallExpression)
+	p.registerInfix(lexer.TokenColon, p.parseMemberAccessExpression)
 
 	return p
 }
 
 func (p *Parser) currentToken() lexer.Token {
 	if p.pos >= len(p.tokens) {
-		// Return EOF if out of bounds
-		lastToken := lexer.Token{Type: lexer.TokenEOF, Line: -1, Column: -1} // synthetic EOF
+		line, col := -1, -1
 		if len(p.tokens) > 0 {
-			lastToken = p.tokens[len(p.tokens)-1] // Use last known token's pos for EOF error
-			lastToken.Type = lexer.TokenEOF
-			lastToken.Literal = ""
+			last := p.tokens[len(p.tokens)-1]
+			line = last.Line
+			col = last.Column + len(last.Literal)
 		}
-		return lastToken
+		return lexer.Token{Type: lexer.TokenEOF, Literal: "", Line: line, Column: col}
 	}
 	return p.tokens[p.pos]
 }
 
-func (p *Parser) peekToken() lexer.Token {
-	if p.pos+1 >= len(p.tokens) {
-		return p.currentToken() // effectively EOF
-	}
-	return p.tokens[p.pos+1]
-}
-
 func (p *Parser) nextToken() {
-	if p.pos < len(p.tokens) { // Ensure we don't go past EOF if already there
+	if p.pos < len(p.tokens) {
 		p.pos++
 	}
 }
 
-func (p *Parser) expectToken(t lexer.TokenType) bool {
-	if p.currentToken().Type == t {
+func (p *Parser) expectToken(expectedType lexer.TokenType) bool {
+	current := p.currentToken()
+	if current.Type == expectedType {
 		p.nextToken()
 		return true
 	}
-	p.errorExpectedToken(t)
+	p.errorExpectedToken(expectedType, current)
 	return false
 }
 
-func (p *Parser) errorExpectedToken(expected lexer.TokenType) {
+func (p *Parser) errorExpectedToken(expectedType lexer.TokenType, actualToken lexer.Token) {
 	msg := fmt.Sprintf("line %d, col %d: expected token %s, got %s (%q)",
-		p.currentToken().Line, p.currentToken().Column, expected, p.currentToken().Type, p.currentToken().Literal)
+		actualToken.Line, actualToken.Column, expectedType, actualToken.Type, actualToken.Literal)
 	p.errors = append(p.errors, msg)
 }
 
-func (p *Parser) errorUnexpectedToken(message string) {
+func (p *Parser) errorUnexpectedToken(message string, tokenForPos lexer.Token) {
 	msg := fmt.Sprintf("line %d, col %d: %s, got %s (%q)",
-		p.currentToken().Line, p.currentToken().Column, message, p.currentToken().Type, p.currentToken().Literal)
+		tokenForPos.Line, tokenForPos.Column, message, tokenForPos.Type, tokenForPos.Literal)
 	p.errors = append(p.errors, msg)
 }
 
@@ -147,39 +138,313 @@ func (p *Parser) registerInfix(tokenType lexer.TokenType, fn infixParseFn) {
 	p.infixParseFns[tokenType] = fn
 }
 
+func (p *Parser) currentPrecedence() int {
+	if prec, ok := precedences[p.currentToken().Type]; ok {
+		return prec
+	}
+	return Lowest
+}
+
 // ParseFile is the entry point for parsing a Ballerina file.
+// MODIFIED to correctly populate fileNode.Imports
 func (p *Parser) ParseFile() (*FileNode, error) {
-	fileNode := &FileNode{Token: p.currentToken()} // Use first token for FileNode
+	fileNode := &FileNode{Token: p.currentToken()}
+	// Initialize slices to prevent nil pointer issues if file is empty
+	fileNode.Imports = []*ImportNode{}
+	fileNode.Definitions = []Node{}
 
 	for p.currentToken().Type != lexer.TokenEOF {
-		switch p.currentToken().Type {
+		initialPos := p.pos
+		currentTokenForSwitch := p.currentToken()
+		parsedSuccessfully := true // Assume success unless a parse function returns nil
+
+		switch currentTokenForSwitch.Type {
 		case lexer.TokenKwImport:
 			imp := p.parseImportStatement()
 			if imp != nil {
 				fileNode.Imports = append(fileNode.Imports, imp)
+			} else {
+				parsedSuccessfully = false // parseImportStatement failed
 			}
-		case lexer.TokenKwPublic, lexer.TokenKwFunction: // Also handle private/package-private functions later
+		case lexer.TokenKwPublic, lexer.TokenKwFunction:
 			fn := p.parseFunctionDefinition()
 			if fn != nil {
 				fileNode.Definitions = append(fileNode.Definitions, fn)
+			} else {
+				parsedSuccessfully = false // parseFunctionDefinition failed
 			}
 		default:
-			// Skip unknown top-level tokens for now, or error
-			p.errorUnexpectedToken(fmt.Sprintf("unexpected top-level token %s", p.currentToken().Type))
-			p.nextToken() // consume to avoid infinite loop
+			p.errorUnexpectedToken("unexpected top-level token", currentTokenForSwitch)
+			p.nextToken()              // Consume the unexpected token
+			parsedSuccessfully = false // Not a recognized top-level construct
 		}
-		if len(p.errors) > 50 { // Prevent too many errors
+
+		// If parsing a construct failed (parser returned nil) AND the parser position didn't advance,
+		// it means the specific parse function got stuck. Force advancement.
+		if !parsedSuccessfully && p.pos == initialPos && p.currentToken().Type != lexer.TokenEOF {
+			// This situation implies a bug in a sub-parser that returned nil without advancing
+			// and potentially without logging a specific enough error.
+			if len(p.errors) == 0 || p.errors[len(p.errors)-1] != fmt.Sprintf("line %d, col %d: unexpected top-level token, got %s (%q)", currentTokenForSwitch.Line, currentTokenForSwitch.Column, currentTokenForSwitch.Type, currentTokenForSwitch.Literal) {
+				// Add a "stuck" error only if the default case didn't already cover this token
+				p.errorUnexpectedToken("parser stuck after failing to parse top-level element", p.currentToken())
+			}
+			p.nextToken() // Force advancement
+		}
+
+		if len(p.errors) > 50 {
 			p.errors = append(p.errors, "too many errors, parsing aborted")
 			break
 		}
 	}
 
 	if len(p.errors) > 0 {
-		// Concatenate errors into a single error object if desired
-		// For simplicity, returning the first one or a summary
-		return nil, fmt.Errorf("parsing failed with %d errors: %s", len(p.errors), p.errors[0])
+		var errorBuilder strings.Builder
+		errorBuilder.WriteString(fmt.Sprintf("parsing error: parsing failed with %d error(s):\n", len(p.errors)))
+		for i, e := range p.errors {
+			errorBuilder.WriteString(fmt.Sprintf("  %d: %s\n", i+1, e))
+		}
+		return nil, fmt.Errorf(errorBuilder.String())
 	}
 	return fileNode, nil
+}
+
+// Pratt parser core logic for expressions
+func (p *Parser) parseExpression(precedence int) Expression {
+	prefixFn := p.prefixParseFns[p.currentToken().Type]
+	if prefixFn == nil {
+		p.errorUnexpectedToken(fmt.Sprintf("no prefix parse function for token %s ('%s')", p.currentToken().Type, p.currentToken().Literal), p.currentToken())
+		return nil
+	}
+	leftExp := prefixFn()
+
+	if leftExp == nil {
+		return nil
+	}
+
+	for {
+		currentOpToken := p.currentToken()
+		currentOpPrecedence := p.currentPrecedence()
+
+		if precedence >= currentOpPrecedence {
+			break
+		}
+
+		infixFn := p.infixParseFns[currentOpToken.Type]
+		if infixFn == nil {
+			break
+		}
+		leftExp = infixFn(leftExp)
+		if leftExp == nil {
+			return nil
+		}
+	}
+	return leftExp
+}
+
+func (p *Parser) parseIdentifier() Expression {
+	current := p.currentToken()
+	if current.Type != lexer.TokenIdentifier {
+		p.errorUnexpectedToken("expected identifier", current)
+		return nil
+	}
+	ident := &IdentifierNode{Token: current, Value: current.Literal}
+	p.nextToken()
+	return ident
+}
+
+func (p *Parser) parseIntegerLiteral() Expression {
+	tok := p.currentToken()
+	if tok.Type != lexer.TokenIntLiteral {
+		p.errorUnexpectedToken("expected integer literal", tok)
+		return nil
+	}
+	val, err := strconv.ParseInt(tok.Literal, 0, 64)
+	if err != nil {
+		p.errors = append(p.errors, fmt.Sprintf("line %d, col %d: could not parse %q as integer: %v", tok.Line, tok.Column, tok.Literal, err))
+		p.nextToken()
+		return nil
+	}
+	p.nextToken()
+	return &IntegerLiteralNode{Token: tok, Value: val}
+}
+
+func (p *Parser) parseStringLiteral() Expression {
+	tok := p.currentToken()
+	if tok.Type != lexer.TokenStringLiteral {
+		p.errorUnexpectedToken("expected string literal", tok)
+		return nil
+	}
+	p.nextToken()
+	return &StringLiteralNode{Token: tok, Value: tok.Literal}
+}
+
+func (p *Parser) parseBooleanLiteral() Expression {
+	tok := p.currentToken()
+	if tok.Type != lexer.TokenBooleanLiteral {
+		p.errorUnexpectedToken("expected boolean literal", tok)
+		return nil
+	}
+	val := tok.Literal == "true"
+	p.nextToken()
+	return &BooleanLiteralNode{Token: tok, Value: val}
+}
+
+func (p *Parser) parseGroupedExpression() Expression {
+	lParenToken := p.currentToken()
+	if lParenToken.Type != lexer.TokenLParen {
+		p.errorExpectedToken(lexer.TokenLParen, lParenToken)
+		return nil
+	}
+	p.nextToken() // Consume LParen
+
+	exp := p.parseExpression(Lowest)
+	if exp == nil {
+		if p.currentToken().Type != lexer.TokenRParen {
+			p.errorUnexpectedToken("malformed expression or missing ')' in grouped expression", lParenToken)
+		}
+		return nil
+	}
+	if !p.expectToken(lexer.TokenRParen) {
+		return nil
+	}
+	return exp
+}
+
+func (p *Parser) parseInfixExpression(left Expression) Expression {
+	operatorToken := p.currentToken()
+	expr := &BinaryExpressionNode{
+		Token:    operatorToken,
+		Operator: operatorToken.Literal,
+		Left:     left,
+	}
+	currentOpPrecedence := p.currentPrecedence()
+
+	p.nextToken() // Consume the operator.
+
+	rhsStartToken := p.currentToken()
+	expr.Right = p.parseExpression(currentOpPrecedence)
+	if expr.Right == nil {
+		if p.currentToken() == rhsStartToken {
+			p.errorUnexpectedToken("expected expression on right side of binary operator", rhsStartToken)
+		}
+		return nil
+	}
+	return expr
+}
+
+func (p *Parser) parseAssignmentExpression(left Expression) Expression {
+	assignToken := p.currentToken() // Current token is '='
+
+	switch left.(type) {
+	case *IdentifierNode, *MemberAccessExpressionNode:
+		// Valid LValue for this subset
+	default:
+		p.errorUnexpectedToken(fmt.Sprintf("invalid assignment target, got %T", left), left.StartToken())
+		return nil
+	}
+
+	assignNode := &AssignmentExpressionNode{
+		Token:  assignToken,
+		Target: left,
+	}
+
+	assignPrecedence := p.currentPrecedence()
+	p.nextToken() // Consume '='
+
+	rhsStartToken := p.currentToken()
+	assignNode.Value = p.parseExpression(assignPrecedence - 1)
+	if assignNode.Value == nil {
+		if p.currentToken() == rhsStartToken {
+			p.errorUnexpectedToken("expected expression after '=' in assignment", rhsStartToken)
+		}
+		return nil
+	}
+	return assignNode
+}
+
+func (p *Parser) parseCallExpression(functionName Expression) Expression {
+	lParenToken := p.currentToken()
+	p.nextToken() // Consume LParen
+
+	args := p.parseExpressionList(lexer.TokenRParen)
+	if args == nil {
+		return nil
+	}
+
+	callExpr := &CallExpressionNode{
+		Token:     lParenToken,
+		Function:  functionName,
+		Arguments: args,
+	}
+	if _, ok := functionName.(*MemberAccessExpressionNode); ok {
+		callExpr.IsMemberAccess = true
+	}
+	return callExpr
+}
+
+func (p *Parser) parseMemberAccessExpression(left Expression) Expression {
+	colonToken := p.currentToken()
+	p.nextToken() // Consume ':'
+
+	memberNameToken := p.currentToken()
+	memberNameExpr := p.parseIdentifier()
+	if memberNameExpr == nil {
+		return nil
+	}
+	memberName, ok := memberNameExpr.(*IdentifierNode)
+	if !ok {
+		p.errorUnexpectedToken("member name must be an identifier (internal parser error: unexpected type)", memberNameToken)
+		return nil
+	}
+
+	return &MemberAccessExpressionNode{
+		Token:      colonToken,
+		Expression: left,
+		MemberName: memberName,
+	}
+}
+
+func (p *Parser) parseExpressionList(endToken lexer.TokenType) []Expression {
+	list := []Expression{}
+
+	if p.currentToken().Type == endToken {
+		p.nextToken()
+		return list
+	}
+
+	firstExprTokenPos := p.currentToken()
+	firstExpr := p.parseExpression(Lowest)
+	if firstExpr == nil {
+		if p.currentToken() == firstExprTokenPos && p.currentToken().Type != endToken {
+			p.errorUnexpectedToken("expected expression in list, but parsing failed to advance", firstExprTokenPos)
+		}
+		return nil
+	}
+	list = append(list, firstExpr)
+
+	for p.currentToken().Type == lexer.TokenComma {
+		p.nextToken()
+
+		if p.currentToken().Type == endToken {
+			p.errorUnexpectedToken("unexpected end token after comma (trailing comma?)", p.currentToken())
+			return nil
+		}
+
+		nextExprTokenPos := p.currentToken()
+		expr := p.parseExpression(Lowest)
+		if expr == nil {
+			if p.currentToken() == nextExprTokenPos && p.currentToken().Type != endToken {
+				p.errorUnexpectedToken("expected expression after comma, but parsing failed to advance", nextExprTokenPos)
+			}
+			return nil
+		}
+		list = append(list, expr)
+	}
+
+	if !p.expectToken(endToken) {
+		return nil
+	}
+	return list
 }
 
 func (p *Parser) parseImportStatement() *ImportNode {
@@ -188,31 +453,40 @@ func (p *Parser) parseImportStatement() *ImportNode {
 		return nil
 	}
 
-	// Simplified: ballerina/io or io (assuming ballerina org for now if no slash)
-	// A full parser would handle org-name/pkg-name:version [as alias]
-	identParts := []string{}
-	firstIdent := p.parseIdentifier()
-	if firstIdent == nil {
-		p.errorUnexpectedToken("expected module name after import")
+	firstIdentToken := p.currentToken()
+	firstIdentExpr := p.parseIdentifier()
+	if firstIdentExpr == nil {
 		return nil
 	}
-	identParts = append(identParts, firstIdent.Value)
-
-	if p.currentToken().Type == lexer.TokenSlash {
-		p.nextToken() // Consume '/'
-		secondIdent := p.parseIdentifier()
-		if secondIdent == nil {
-			p.errorUnexpectedToken("expected package name after '/' in import")
-			return nil
-		}
-		stmt.OrgName = identParts[0]
-		stmt.PackageName = secondIdent.Value
-	} else {
-		stmt.PackageName = identParts[0] // e.g. import http;
+	firstIdentNode, ok := firstIdentExpr.(*IdentifierNode)
+	if !ok {
+		p.errorUnexpectedToken("module name component must be an identifier", firstIdentToken)
+		return nil
 	}
 
-	// Optional 'as alias'
-	// TODO: Add 'as' keyword and alias parsing. For now, this is skipped.
+	if p.currentToken().Type == lexer.TokenSlash {
+		stmt.OrgName = firstIdentNode.Value
+		p.nextToken()
+
+		packageNameToken := p.currentToken()
+		secondIdentExpr := p.parseIdentifier()
+		if secondIdentExpr == nil {
+			return nil
+		}
+		secondIdentNode, ok := secondIdentExpr.(*IdentifierNode)
+		if !ok {
+			p.errorUnexpectedToken("package name component must be an identifier", packageNameToken)
+			return nil
+		}
+		stmt.PackageName = secondIdentNode.Value
+	} else {
+		stmt.PackageName = firstIdentNode.Value
+		// By default, OrgName is empty if not specified with a slash.
+		// A later step or semantic analysis might assign a default org.
+	}
+
+	// TODO: Parse 'as <alias>' here and set stmt.Alias
+	// For now, stmt.Alias remains "" if not set by 'as' clause.
 
 	if !p.expectToken(lexer.TokenSemicolon) {
 		return nil
@@ -225,174 +499,147 @@ func (p *Parser) parseFunctionDefinition() *FunctionDefinitionNode {
 
 	if p.currentToken().Type == lexer.TokenKwPublic {
 		stmt.Visibility = "public"
-		p.nextToken() // Consume 'public'
+		p.nextToken()
 	} else {
-		stmt.Visibility = "" // package-private by default
+		stmt.Visibility = ""
 	}
 
 	if !p.expectToken(lexer.TokenKwFunction) {
 		return nil
 	}
 
-	stmt.Name = p.parseIdentifier()
-	if stmt.Name == nil {
-		p.errorUnexpectedToken("expected function name")
+	nameToken := p.currentToken()
+	nameExpr := p.parseIdentifier()
+	if nameExpr == nil {
 		return nil
 	}
+	nameIdent, ok := nameExpr.(*IdentifierNode)
+	if !ok {
+		p.errorUnexpectedToken("function name must be an identifier (internal parser error: unexpected type)", nameToken)
+		return nil
+	}
+	stmt.Name = nameIdent
 
 	if !p.expectToken(lexer.TokenLParen) {
 		return nil
 	}
 	stmt.Parameters = p.parseFunctionParameters()
+	if stmt.Parameters == nil && len(p.errors) > 0 && p.currentToken().Type != lexer.TokenRParen {
+		return nil
+	}
 	if !p.expectToken(lexer.TokenRParen) {
 		return nil
 	}
 
-	// Optional return type
-	if p.currentToken().Type != lexer.TokenLBrace { // If it's not body, it might be return type
-		// Ballerina uses 'returns TypeAnnotation'
-		// For simplicity, if not '{', assume it's a type for return
-		// A more robust parser would look for 'returns' keyword.
-		// This simplified parser assumes type directly.
-		// Example: function foo() int { ... } (not standard Ballerina, standard is 'returns int')
-		// Let's try to parse 'returns' keyword if present
-		if p.currentToken().Literal == "returns" { // Not a token type, check literal
-			p.nextToken() // consume "returns"
-			stmt.ReturnType = p.parseType()
-			if stmt.ReturnType == nil {
-				p.errorUnexpectedToken("expected return type after 'returns'")
-				return nil
-			}
-		} else if p.currentToken().Type == lexer.TokenKwInt ||
-			p.currentToken().Type == lexer.TokenKwstring ||
-			p.currentToken().Type == lexer.TokenKwBoolean ||
-			p.currentToken().Type == lexer.TokenIdentifier { // For custom types
-			// This is a simplified way to handle return types without "returns" keyword
-			// which is not Ballerina standard but common in other languages.
-			// For true Ballerina, 'returns' is mandatory for typed returns.
-			// This part can be adjusted to strictly follow Ballerina spec.
-			// For this example, let's assume direct type means return type if not LBrace
-			// p.errorUnexpectedToken("expected 'returns' keyword for return type or '{' for function body")
-			// return nil
-			// OR, parse as a typenode (non-standard for ballerina without 'returns')
-			// For this simplified subset, we will allow direct type declaration for return type.
-			// If the subset should be stricter, this would be an error.
-			// For now, let's assume `function foo() Type {` is what we're trying to parse
-			// This is not standard Ballerina. Standard is `function foo() returns Type {`
-			// For the sake of having *some* return type parsing:
-			if p.currentToken().Type != lexer.TokenLBrace {
-				stmt.ReturnType = p.parseType()
-				if stmt.ReturnType == nil {
-					p.errorUnexpectedToken("expected return type or '{' for function body")
-					return nil
-				}
-			}
+	if p.currentToken().Literal == "returns" {
+		p.nextToken()
+		returnTypeToken := p.currentToken()
+		stmt.ReturnType = p.parseType()
+		if stmt.ReturnType == nil {
+			p.errorUnexpectedToken("expected return type after 'returns' keyword", returnTypeToken)
+			return nil
 		}
 	}
 
-	if p.currentToken().Type != lexer.TokenLBrace {
-		p.errorUnexpectedToken("expected '{' for function body")
+	bodyToken := p.currentToken()
+	if bodyToken.Type != lexer.TokenLBrace {
+		p.errorExpectedToken(lexer.TokenLBrace, bodyToken)
 		return nil
 	}
 	stmt.Body = p.parseBlockStatement()
+	if stmt.Body == nil {
+		return nil
+	}
 
 	return stmt
 }
 
 func (p *Parser) parseFunctionParameters() []*ParameterNode {
 	params := []*ParameterNode{}
-	if p.currentToken().Type == lexer.TokenRParen { // No parameters
+	if p.currentToken().Type == lexer.TokenRParen {
 		return params
 	}
 
 	param := p.parseParameter()
-	if param != nil {
-		params = append(params, param)
-	} else {
-		return nil // Error in parsing first param
+	if param == nil {
+		return nil
 	}
+	params = append(params, param)
 
 	for p.currentToken().Type == lexer.TokenComma {
-		p.nextToken() // Consume ','
+		p.nextToken()
+		nextParamToken := p.currentToken()
 		param = p.parseParameter()
-		if param != nil {
-			params = append(params, param)
-		} else {
-			return nil // Error in parsing subsequent param
+		if param == nil {
+			isValidStartOfParam := p.currentToken().Type == lexer.TokenIdentifier ||
+				p.currentToken().Type == lexer.TokenKwInt ||
+				p.currentToken().Type == lexer.TokenKwstring ||
+				p.currentToken().Type == lexer.TokenKwBoolean
+			if !isValidStartOfParam && p.currentToken() != nextParamToken && p.currentToken().Type != lexer.TokenRParen {
+				p.errorUnexpectedToken("expected parameter after comma", nextParamToken)
+			}
+			return nil
 		}
+		params = append(params, param)
 	}
 	return params
 }
 
 func (p *Parser) parseParameter() *ParameterNode {
-	param := &ParameterNode{Token: p.currentToken()} // Token of type
-	param.Type = p.parseType()
-	if param.Type == nil {
+	typeToken := p.currentToken()
+	paramType := p.parseType()
+	if paramType == nil {
+		p.errorUnexpectedToken("expected parameter type", typeToken)
 		return nil
 	}
-	param.Name = p.parseIdentifier()
-	if param.Name == nil {
-		p.errorUnexpectedToken("expected parameter name")
+
+	nameToken := p.currentToken()
+	nameExpr := p.parseIdentifier()
+	if nameExpr == nil {
 		return nil
 	}
-	return param
+	nameIdent, ok := nameExpr.(*IdentifierNode)
+	if !ok {
+		p.errorUnexpectedToken("parameter name must be an identifier (internal parser error: unexpected type)", nameToken)
+		return nil
+	}
+
+	return &ParameterNode{Token: typeToken, Type: paramType, Name: nameIdent}
 }
 
 func (p *Parser) parseType() *TypeNode {
-	// Handles basic types like int, string, boolean
-	// For arrays, custom types, nilable types, this needs expansion
 	tok := p.currentToken()
 	typeName := ""
-	isBasicType := false
 
 	switch tok.Type {
-	case lexer.TokenKwInt:
-		typeName = "int"
-		isBasicType = true
-	case lexer.TokenKwstring:
-		typeName = "string"
-		isBasicType = true
-	case lexer.TokenKwBoolean:
-		typeName = "boolean"
-		isBasicType = true
-	case lexer.TokenIdentifier: // Could be a custom type name
+	case lexer.TokenKwInt, lexer.TokenKwstring, lexer.TokenKwBoolean:
 		typeName = tok.Literal
-		isBasicType = false // Or true if it resolves to a basic type synonym later
+	case lexer.TokenIdentifier:
+		typeName = tok.Literal
 	default:
-		p.errorUnexpectedToken("expected type name")
 		return nil
 	}
-
-	if isBasicType == true {
-	}
-
-	p.nextToken() // Consume type token
-
-	// TODO: Add parsing for array type `[]` and nilable `?`
+	p.nextToken()
 	return &TypeNode{Token: tok, TypeName: typeName}
 }
 
 func (p *Parser) parseBlockStatement() *BlockStatementNode {
-	block := &BlockStatementNode{Token: p.currentToken()}
+	blockToken := p.currentToken()
+	block := &BlockStatementNode{Token: blockToken}
 	if !p.expectToken(lexer.TokenLBrace) {
 		return nil
 	}
 
 	block.Statements = []Statement{}
 	for p.currentToken().Type != lexer.TokenRBrace && p.currentToken().Type != lexer.TokenEOF {
+		stmtStartToken := p.currentToken()
 		stmt := p.parseStatement()
 		if stmt != nil {
 			block.Statements = append(block.Statements, stmt)
 		} else {
-			// Error already reported by parseStatement, consume token to prevent infinite loop if it didn't.
-			// However, parseStatement should consume or error out.
-			// If parseStatement returns nil and doesn't advance, this could loop.
-			// For now, assume parseStatement correctly handles advancement or errors.
-			// If a statement parsing fails and returns nil, it might be better to stop parsing the block.
-			// For robustness, we can add p.nextToken() here if stmt is nil and errors occurred.
-			if len(p.errors) > 0 && p.currentToken().Type != lexer.TokenRBrace { // Avoid skipping RBrace
-				// This is a bit risky, as the failed statement parser might have already advanced.
-				// A safer approach is for sub-parsers to always advance past what they tried to parse.
+			if p.currentToken() == stmtStartToken && p.currentToken().Type != lexer.TokenRBrace && p.currentToken().Type != lexer.TokenEOF {
+				p.errorUnexpectedToken("failed to parse statement or parser stuck in block", p.currentToken())
+				p.nextToken()
 			}
 		}
 	}
@@ -404,57 +651,66 @@ func (p *Parser) parseBlockStatement() *BlockStatementNode {
 }
 
 func (p *Parser) parseStatement() Statement {
-	switch p.currentToken().Type {
-	case lexer.TokenKwInt, lexer.TokenKwstring, lexer.TokenKwBoolean, lexer.TokenKwVar: // Start of a variable declaration
-		// Also could be TokenIdentifier if it's a custom type
-		return p.parseVariableDeclarationStatement()
+	var stmt Statement
+	currentStatementStartToken := p.currentToken()
+	switch currentStatementStartToken.Type {
+	case lexer.TokenKwInt, lexer.TokenKwstring, lexer.TokenKwBoolean, lexer.TokenKwVar:
+		stmt = p.parseVariableDeclarationStatement()
 	case lexer.TokenKwReturn:
-		return p.parseReturnStatement()
+		stmt = p.parseReturnStatement()
 	case lexer.TokenKwIf:
-		return p.parseIfStatement()
-	default: // Assume expression statement (like a function call)
-		// Check if it's a valid start of an expression
-		if p.prefixParseFns[p.currentToken().Type] != nil || p.currentToken().Type == lexer.TokenIdentifier {
-			return p.parseExpressionStatement()
+		stmt = p.parseIfStatement()
+	default:
+		if p.prefixParseFns[currentStatementStartToken.Type] != nil {
+			stmt = p.parseExpressionStatement()
+		} else {
+			p.errorUnexpectedToken("expected statement", currentStatementStartToken)
+			p.nextToken()
+			return nil
 		}
-		p.errorUnexpectedToken("expected statement")
-		p.nextToken() // Consume the problematic token to avoid infinite loop
-		return nil
 	}
+	return stmt
 }
 
 func (p *Parser) parseVariableDeclarationStatement() *VariableDeclarationNode {
 	stmt := &VariableDeclarationNode{Token: p.currentToken()}
 
-	// Type parsing
-	// If 'var', type is inferred (not fully supported in BIR emitter for this subset)
 	if p.currentToken().Type == lexer.TokenKwVar {
-		p.nextToken() // consume 'var'
-		// TypeNode will be special, or nil, indicating inference
-		stmt.Type = &TypeNode{Token: stmt.Token, TypeName: "var"} // Placeholder
+		varToken := p.currentToken()
+		p.nextToken()
+		stmt.Type = &TypeNode{Token: varToken, TypeName: "var"}
 	} else {
-		typ := p.parseType()
-		if typ == nil {
-			return nil // Error in type parsing
+		typeToken := p.currentToken()
+		parsedType := p.parseType()
+		if parsedType == nil {
+			p.errorUnexpectedToken("expected type name in variable declaration", typeToken)
+			return nil
 		}
-		stmt.Type = typ
+		stmt.Type = parsedType
 	}
 
-	stmt.Name = p.parseIdentifier()
-	if stmt.Name == nil {
-		p.errorUnexpectedToken("expected variable name")
+	nameToken := p.currentToken()
+	nameExpr := p.parseIdentifier()
+	if nameExpr == nil {
+		return nil
+	}
+	nameIdent, ok := nameExpr.(*IdentifierNode)
+	if !ok {
+		p.errorUnexpectedToken("variable name must be an identifier (internal parser error: unexpected type)", nameToken)
+		return nil
+	}
+	stmt.Name = nameIdent
+
+	if !p.expectToken(lexer.TokenEqual) { // This is for `var_decl = expr`, not assignment expression
 		return nil
 	}
 
-	if p.currentToken().Type != lexer.TokenEqual {
-		p.errorExpectedToken(lexer.TokenEqual)
-		return nil
-	}
-	p.nextToken() // Consume '='
-
+	initialValueTokenPos := p.currentToken()
 	stmt.InitialValue = p.parseExpression(Lowest)
 	if stmt.InitialValue == nil {
-		p.errorUnexpectedToken("expected expression for variable initialization")
+		if p.currentToken() == initialValueTokenPos {
+			p.errorUnexpectedToken("expected expression for variable initialization", initialValueTokenPos)
+		}
 		return nil
 	}
 
@@ -470,12 +726,14 @@ func (p *Parser) parseReturnStatement() *ReturnStatementNode {
 		return nil
 	}
 
-	// Check if there's a return value or just ';'
-	if p.currentToken().Type != lexer.TokenSemicolon {
+	if p.currentToken().Type != lexer.TokenSemicolon && p.currentToken().Type != lexer.TokenEOF {
+		returnValueTokenPos := p.currentToken()
 		stmt.ReturnValue = p.parseExpression(Lowest)
 		if stmt.ReturnValue == nil {
-			p.errorUnexpectedToken("expected expression or ';' after return")
-			// No return nil here, as a return statement can be valid without an expression (if followed by ';')
+			if p.currentToken() == returnValueTokenPos {
+				p.errorUnexpectedToken("expected expression or ';' after return", returnValueTokenPos)
+			}
+			return nil
 		}
 	}
 
@@ -491,24 +749,18 @@ func (p *Parser) parseIfStatement() *IfStatementNode {
 		return nil
 	}
 
-	// Ballerina condition is an expression, not necessarily in parentheses
-	// However, `if expr {` is common. For simplicity, we don't mandate `()` around condition.
-	// A full spec parser would handle this more precisely.
-	// if p.currentToken().Type == lexer.TokenLParen {
-	//  p.nextToken() // consume (
-	// 	stmt.Condition = p.parseExpression(Lowest)
-	// 	if !p.expectToken(lexer.TokenRParen) { return nil }
-	// } else {
+	conditionTokenPos := p.currentToken()
 	stmt.Condition = p.parseExpression(Lowest)
-	// }
-
 	if stmt.Condition == nil {
-		p.errorUnexpectedToken("expected condition for if statement")
+		if p.currentToken() == conditionTokenPos {
+			p.errorUnexpectedToken("expected condition for if statement", conditionTokenPos)
+		}
 		return nil
 	}
 
-	if p.currentToken().Type != lexer.TokenLBrace {
-		p.errorExpectedToken(lexer.TokenLBrace)
+	consequenceTokenPos := p.currentToken()
+	if consequenceTokenPos.Type != lexer.TokenLBrace {
+		p.errorExpectedToken(lexer.TokenLBrace, consequenceTokenPos)
 		return nil
 	}
 	stmt.Consequence = p.parseBlockStatement()
@@ -516,45 +768,16 @@ func (p *Parser) parseIfStatement() *IfStatementNode {
 		return nil
 	}
 
-	// Else part
 	if p.currentToken().Type == lexer.TokenKwElse {
-		p.nextToken()                                 // Consume 'else'
-		if p.currentToken().Type == lexer.TokenKwIf { // Else if
-			// For simplicity, treating 'else if' as a nested if inside the else block
-			// A more advanced AST might have an ElseIfChain field.
-			// Here, we expect 'else { ... }' or 'else if ... { ... }'
-			// For 'else if', the 'if' becomes a statement within an implicit block for 'else'.
-			// This is a common simplification.
-			// Or, make Alternative an IfStatementNode or BlockStatementNode
-			// For now, assume 'else' is followed by a block or another 'if'.
-			// If it's 'else if', the next token is 'if', so parseIfStatement will handle it.
-			// But current parseBlockStatement expects '{'.
-			// Let's make 'else' always expect a block. 'else if' is `else { if ... }`
-			if p.currentToken().Type != lexer.TokenLBrace && p.currentToken().Type != lexer.TokenKwIf {
-				p.errorUnexpectedToken("expected '{' or 'if' after 'else'")
-				return nil
-			}
-			// This needs to be a block, even if it's `else if`.
-			// `else if cond {}` is `else { if cond {} }` implicitly.
-			// For this simple parser, `else` must be followed by a block.
-			// An `else if` structure will be `else { IfStatementNode }`
-			// This means the `parseStatement` within `parseBlockStatement` needs to handle `if`.
-			// This structure is fine.
+		p.nextToken()
 
-			// For 'else if', we'd create a new block with just the IfStatementNode.
-			// This is getting complex for the subset.
-			// Let's simplify: 'else' is ONLY followed by a BlockStatement.
-			// So `else if` is not directly supported as `else IfStatementNode`. It has to be `else { if ... }`.
-			// Which is fine and common.
-			if p.currentToken().Type != lexer.TokenLBrace {
-				p.errorUnexpectedToken("expected '{' after 'else'")
-				return nil
-			}
-			stmt.Alternative = p.parseBlockStatement() // This handles `else { if ... }` correctly
-		} else if p.currentToken().Type == lexer.TokenLBrace {
-			stmt.Alternative = p.parseBlockStatement()
-		} else {
-			p.errorUnexpectedToken("expected '{' after 'else'")
+		alternativeTokenPos := p.currentToken()
+		if alternativeTokenPos.Type != lexer.TokenLBrace {
+			p.errorExpectedToken(lexer.TokenLBrace, alternativeTokenPos)
+			return nil
+		}
+		stmt.Alternative = p.parseBlockStatement()
+		if stmt.Alternative == nil {
 			return nil
 		}
 	}
@@ -562,190 +785,18 @@ func (p *Parser) parseIfStatement() *IfStatementNode {
 }
 
 func (p *Parser) parseExpressionStatement() *ExpressionStatementNode {
-	stmt := &ExpressionStatementNode{Token: p.currentToken()}
+	stmtStartToken := p.currentToken()
+	stmt := &ExpressionStatementNode{Token: stmtStartToken}
+
 	stmt.Expression = p.parseExpression(Lowest)
 	if stmt.Expression == nil {
-		// Error already reported by parseExpression
+		if p.currentToken() == stmtStartToken {
+		}
 		return nil
 	}
 
-	// Expression statements must end with a semicolon in Ballerina
 	if !p.expectToken(lexer.TokenSemicolon) {
 		return nil
 	}
 	return stmt
-}
-
-// Pratt parser core logic
-func (p *Parser) parseExpression(precedence int) Expression {
-	prefix := p.prefixParseFns[p.currentToken().Type]
-	if prefix == nil {
-		p.errorUnexpectedToken(fmt.Sprintf("no prefix parse function for %s", p.currentToken().Type))
-		return nil
-	}
-	leftExp := prefix()
-
-	// Loop for infix operators
-	for p.currentToken().Type != lexer.TokenSemicolon && precedence < p.peekPrecedence() {
-		infix := p.infixParseFns[p.peekToken().Type]
-		if infix == nil {
-			return leftExp // No infix operator found, or it's lower precedence
-		}
-		p.nextToken() // Consume the operator
-		leftExp = infix(leftExp)
-	}
-	return leftExp
-}
-
-func (p *Parser) peekPrecedence() int {
-	if pr, ok := precedences[p.peekToken().Type]; ok {
-		return pr
-	}
-	return Lowest
-}
-
-func (p *Parser) currentPrecedence() int {
-	if pr, ok := precedences[p.currentToken().Type]; ok {
-		return pr
-	}
-	return Lowest
-}
-
-// Prefix parsing functions
-func (p *Parser) parseIdentifier() *IdentifierNode {
-	if p.currentToken().Type != lexer.TokenIdentifier {
-		p.errorUnexpectedToken("expected identifier")
-		return nil
-	}
-	ident := &IdentifierNode{Token: p.currentToken(), Value: p.currentToken().Literal}
-	p.nextToken() // Consume identifier
-	return ident
-}
-
-func (p *Parser) parseIntegerLiteral() Expression {
-	lit := &IntegerLiteralNode{Token: p.currentToken()}
-	val, err := strconv.ParseInt(lit.Token.Literal, 0, 64)
-	if err != nil {
-		p.errors = append(p.errors, fmt.Sprintf("line %d, col %d: could not parse %q as integer: %v", lit.Token.Line, lit.Token.Column, lit.Token.Literal, err))
-		p.nextToken() // Consume the bad literal
-		return nil
-	}
-	lit.Value = val
-	p.nextToken() // Consume literal
-	return lit
-}
-
-func (p *Parser) parseStringLiteral() Expression {
-	lit := &StringLiteralNode{Token: p.currentToken(), Value: p.currentToken().Literal}
-	p.nextToken() // Consume literal
-	return lit
-}
-
-func (p *Parser) parseBooleanLiteral() Expression {
-	tok := p.currentToken()
-	val := tok.Literal == "true"
-	p.nextToken() // Consume literal
-	return &BooleanLiteralNode{Token: tok, Value: val}
-}
-
-func (p *Parser) parseGroupedExpression() Expression {
-	p.nextToken() // Consume '('
-	exp := p.parseExpression(Lowest)
-	if !p.expectToken(lexer.TokenRParen) {
-		return nil // Error: expected ')'
-	}
-	return exp
-}
-
-// Infix parsing functions
-func (p *Parser) parseInfixExpression(left Expression) Expression {
-	expr := &BinaryExpressionNode{
-		Token:    p.currentToken(), // Operator token
-		Operator: p.currentToken().Literal,
-		Left:     left,
-	}
-	precedence := p.currentPrecedence()
-	p.nextToken() // Consume operator
-	expr.Right = p.parseExpression(precedence)
-	if expr.Right == nil {
-		p.errorUnexpectedToken("expected expression on right side of binary operator")
-		return nil
-	}
-	return expr
-}
-
-func (p *Parser) parseCallExpression(function Expression) Expression {
-	// 'function' is the expression representing the function name (Identifier or MemberAccess)
-	// Current token is '(', which was used to dispatch here.
-	callExpr := &CallExpressionNode{Token: p.currentToken(), Function: function}
-	// p.nextToken() // Consume '(', already done by the Pratt dispatcher if LParen is infix
-
-	callExpr.Arguments = p.parseExpressionList(lexer.TokenRParen)
-
-	// We don't need expectToken(RParen) here because parseExpressionList consumes it.
-	// Or, if parseExpressionList does not consume it:
-	// if !p.expectToken(lexer.TokenRParen) { return nil }
-	// The call to parseCallExpression happens when LParen is *peeked*.
-	// The pratt loop advances to LParen (current token), then calls this.
-	// So current token is LParen.
-
-	if _, ok := function.(*MemberAccessExpressionNode); ok {
-		callExpr.IsMemberAccess = true
-	}
-
-	return callExpr
-}
-
-func (p *Parser) parseMemberAccessExpression(left Expression) Expression {
-	// 'left' is the module/object identifier.
-	// Current token is ':', which was used to dispatch here.
-	expr := &MemberAccessExpressionNode{
-		Token:      p.currentToken(), // ':' token
-		Expression: left,
-	}
-	// p.nextToken() // Consume ':', already done by Pratt dispatcher.
-
-	if p.currentToken().Type != lexer.TokenIdentifier {
-		p.errorUnexpectedToken("expected identifier for member name after ':'")
-		return nil
-	}
-	expr.MemberName = p.parseIdentifier() // This will consume the identifier
-	if expr.MemberName == nil {
-		return nil // Error already reported by parseIdentifier
-	}
-
-	return expr
-}
-
-func (p *Parser) parseExpressionList(endToken lexer.TokenType) []Expression {
-	list := []Expression{}
-
-	if p.currentToken().Type == endToken { // Empty list like foo()
-		p.nextToken() // Consume endToken
-		return list
-	}
-
-	firstExpr := p.parseExpression(Lowest)
-	if firstExpr == nil {
-		p.errorUnexpectedToken("expected expression in list")
-		return nil // Propagate error
-	}
-	list = append(list, firstExpr)
-
-	for p.currentToken().Type == lexer.TokenComma {
-		p.nextToken() // Consume ','
-		expr := p.parseExpression(Lowest)
-		if expr == nil {
-			p.errorUnexpectedToken("expected expression after comma in list")
-			return nil // Propagate error
-		}
-		list = append(list, expr)
-	}
-
-	if !p.expectToken(endToken) {
-		// Error already reported by expectToken
-		return nil // Indicate error by returning nil
-	}
-
-	return list
 }

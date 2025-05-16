@@ -4,8 +4,73 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"             // For printing
+	"wx-yz/lightfoot/bir" // For type access if needed
 	"wx-yz/lightfoot/compiler"
 )
+
+func printFunctionBIR(fn *bir.Function) {
+	fmt.Printf("\n%s %s function(", strings.ToLower(fn.Visibility), fn.Name)
+	paramStrings := []string{}
+	for _, p := range fn.Parameters { // Use fn.Parameters for signature
+		paramStrings = append(paramStrings, p.Type) // Simplified: just type
+	}
+	fmt.Printf("%s) -> %s {\n", strings.Join(paramStrings, ", "), fn.ReturnVariable.Type)
+
+	// Print variable declarations (%N(KIND) type;)
+	// Need to iterate LocalVars and group by kind or print as they appear in target.
+	// The target format lists them at the top. Let's try to replicate.
+
+	// Sort vars by BIRName for consistent printing (optional)
+	// varNames := make([]string, 0, len(fn.LocalVars))
+	// for name := range fn.LocalVars {
+	// 	varNames = append(varNames, name)
+	// }
+	// sort.Strings(varNames)
+
+	// For accurate printing like target, we'd need to collect vars in a specific order (Return, Args, then Locals/Temps by number)
+	// This is simplified for now.
+	printedVars := make(map[string]bool)
+
+	// Print Return Var
+	if fn.ReturnVariable != nil {
+		fmt.Printf("    %s(%s) %s;\n", fn.ReturnVariable.BIRName, fn.ReturnVariable.Kind, fn.ReturnVariable.Type)
+		printedVars[fn.ReturnVariable.BIRName] = true
+	}
+	// Print Arg Vars (as they appear in function.ArgumentVars which should be in order)
+	for _, v := range fn.ArgumentVars {
+		if !printedVars[v.BIRName] {
+			fmt.Printf("    %s(%s) %s; // original: %s\n", v.BIRName, v.Kind, v.Type, v.OriginalName)
+			printedVars[v.BIRName] = true
+		}
+	}
+	// Print other Local/Temp vars, ensuring %0, %1, etc. are not reprinted if they were args/return
+	for birName, v := range fn.LocalVars { // Iterate all known vars
+		if !printedVars[birName] {
+			// Only print if it's not an ARG or RETURN var already printed, or if it's a true LOCAL/TEMP
+			if v.Kind != bir.VarKindArg && v.Kind != bir.VarKindReturn {
+				fmt.Printf("    %s(%s) %s; // original: %s\n", v.BIRName, v.Kind, v.Type, v.OriginalName)
+				printedVars[v.BIRName] = true
+			}
+		}
+	}
+
+	fmt.Println() // Blank line before basic blocks
+
+	for _, bb := range fn.BasicBlocks {
+		fmt.Printf("    %s {\n", bb.ID)
+		for _, instr := range bb.Instructions {
+			fmt.Printf("        %s;\n", instr.String())
+		}
+		if bb.Terminator != nil {
+			fmt.Printf("        %s;\n", bb.Terminator.String())
+		} else {
+			fmt.Printf("        // Error: BB %s has no terminator\n", bb.ID)
+		}
+		fmt.Printf("    }\n")
+	}
+	fmt.Printf("}\n")
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -21,50 +86,46 @@ func main() {
 	}
 
 	comp := compiler.NewCompiler()
-	birPackage, err := comp.Compile(string(sourceCode))
-	if err != nil {
-		fmt.Printf("Compilation failed: %v\n", err)
+	birPackage, errP := comp.Compile(string(sourceCode)) // Changed var name to avoid conflict
+	if errP != nil {
+		fmt.Printf("Compilation failed:\n%v", errP)
 		os.Exit(1)
 	}
 
-	// For demonstration, print the generated BIR (simplified representation)
-	fmt.Println("Compilation Successful. Simplified BIR Output:")
-	fmt.Println("-------------------------------------------")
 	if birPackage == nil {
-		fmt.Println("No BIR package generated (source might be empty or only comments).")
+		fmt.Println("No BIR package generated.")
 		return
 	}
 
-	fmt.Printf("Package: %s.%s version %s\n", birPackage.OrgName, birPackage.Name, birPackage.Version)
-	fmt.Println("Imports:")
+	fmt.Println("================ Emitting Module ================")
+	fmt.Printf("module %s/%s v %s;\n", birPackage.OrgName, birPackage.Name, birPackage.Version)
+	fmt.Println() // Blank line
+
 	for _, imp := range birPackage.ImportModules {
-		fmt.Printf("  %s/%s as %s\n", imp.OrgName, imp.PackageName, imp.Alias)
+		fmt.Printf("import %s/%s v %s;\n", imp.OrgName, imp.PackageName, imp.Version)
+	}
+	fmt.Println()
+	fmt.Println() // Two blank lines like target
+
+	if birPackage.AnnotationData != nil {
+		fmt.Printf("%s %s;\n", birPackage.AnnotationData.Name, birPackage.AnnotationData.Type)
+		fmt.Println()
 	}
 
-	fmt.Println("\nGlobal Variables:")
-	for _, globalVar := range birPackage.GlobalVars {
-		fmt.Printf("  %s %s\n", globalVar.Type, globalVar.Name) // Simplified: No initial value shown here
+	// Print lifecycle functions first
+	if birPackage.ModuleInitFunc != nil {
+		printFunctionBIR(birPackage.ModuleInitFunc)
+	}
+	if birPackage.ModuleStartFunc != nil {
+		printFunctionBIR(birPackage.ModuleStartFunc)
+	}
+	if birPackage.ModuleStopFunc != nil {
+		printFunctionBIR(birPackage.ModuleStopFunc)
 	}
 
-	fmt.Println("\nFunctions:")
+	// Print other functions
 	for _, fn := range birPackage.Functions {
-		fmt.Printf("  Function: %s\n", fn.Name)
-		fmt.Printf("    Visibility: %s\n", fn.Visibility)
-		fmt.Printf("    Return Type: %s\n", fn.ReturnType) // Assuming single return for simplicity
-		fmt.Println("    Parameters:")
-		for _, param := range fn.Parameters {
-			fmt.Printf("      %s %s\n", param.Type, param.Name)
-		}
-		fmt.Println("    Local Variables:")
-		for _, localVar := range fn.LocalVars {
-			fmt.Printf("      %s %s (Kind: %s, Scope: %d)\n", localVar.Type, localVar.Name, localVar.Kind, localVar.ScopeID)
-		}
-		fmt.Println("    Body (Simplified Instructions):")
-		for i, instruction := range fn.Instructions {
-			fmt.Printf("      %d: %s\n", i, instruction.String())
-		}
-		fmt.Println("    ---")
+		printFunctionBIR(fn)
 	}
-	fmt.Println("-------------------------------------------")
-
+	fmt.Println("\n================ Emitting Module ================")
 }
