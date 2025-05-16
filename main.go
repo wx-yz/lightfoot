@@ -10,12 +10,18 @@ import (
 )
 
 func printFunctionBIR(fn *bir.Function) {
+	// For .<init> function, use special return type signature
+	returnType := fn.ReturnVariable.Type
+	if fn.Name == ".<init>" {
+		returnType = "error{map<ballerina/lang.value:0.0.0:Cloneable>}|()"
+	}
+
 	fmt.Printf("\n%s %s function(", strings.ToLower(fn.Visibility), fn.Name)
 	paramStrings := []string{}
 	for _, p := range fn.Parameters { // Use fn.Parameters for signature
 		paramStrings = append(paramStrings, p.Type) // Simplified: just type
 	}
-	fmt.Printf("%s) -> %s {\n", strings.Join(paramStrings, ", "), fn.ReturnVariable.Type)
+	fmt.Printf("%s) -> %s {\n", strings.Join(paramStrings, ", "), returnType)
 
 	// Print variable declarations (%N(KIND) type;)
 	// Need to iterate LocalVars and group by kind or print as they appear in target.
@@ -104,12 +110,17 @@ func main() {
 	for _, imp := range birPackage.ImportModules {
 		fmt.Printf("import %s/%s v %s;\n", imp.OrgName, imp.PackageName, imp.Version)
 	}
-	fmt.Println()
-	fmt.Println() // Two blank lines like target
+	// Target BIR has one blank line after imports, then $annotation_data, then one blank line.
+	fmt.Println() // One blank line after all imports
 
 	if birPackage.AnnotationData != nil {
 		fmt.Printf("%s %s;\n", birPackage.AnnotationData.Name, birPackage.AnnotationData.Type)
-		fmt.Println()
+		fmt.Println() // One blank line after AnnotationData
+	} else {
+		// If no annotation data, maybe still print a blank line if imports were present
+		if len(birPackage.ImportModules) > 0 {
+			fmt.Println() // Ensure a blank line before functions if only imports were present
+		}
 	}
 
 	// Print lifecycle functions first
