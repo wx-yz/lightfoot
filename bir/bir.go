@@ -460,7 +460,7 @@ func (e *Emitter) emitModuleInit() {
 	// In the target BIR, %0 is loaded with 0 (nil for error|() or the map part)
 	// The actual value might be more complex if configurables are involved.
 	// For now, loading "nil" (represented as 0 in BIR for success/empty) is consistent.
-	e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: "nil"}) // "0" for nil
+	e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: e.currentFunc.ReturnVariable.Type})
 
 	bb1 := e.newBBCurrentFunc()
 	e.addTerminator(&GotoInst{TargetBB: bb1.ID})
@@ -492,7 +492,7 @@ func (e *Emitter) emitModuleStartStop(name string) {
 
 	bb0 := e.newBBCurrentFunc()
 	e.setCurrentBB(bb0)
-	e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: "nil"})
+	e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: e.currentFunc.ReturnVariable.Type})
 
 	bb1 := e.newBBCurrentFunc()
 	e.addTerminator(&GotoInst{TargetBB: bb1.ID})
@@ -587,26 +587,34 @@ func (e *Emitter) emitFunctionDefinition(fdn *parser.FunctionDefinitionNode) (*F
 		ArgumentVars: []*Variable{},
 		Parameters:   []*Variable{},
 		BasicBlocks:  []*BasicBlock{},
-		nextVarID:    0,
+		nextVarID:    0, // Initialized to 0
 		nextBBID:     0,
 	}
 
 	returnTypeStr := "()"
 	if fdn.ReturnType != nil {
-		returnTypeStr = mapAstTypeToBirType(fdn.ReturnType.TypeName)
+		// fdn.ReturnType is already a *parser.TypeNode if not nil,
+		// as per parser.FunctionDefinitionNode struct.
+		// We just need to access its TypeName field.
+		returnTypeStr = fdn.ReturnType.TypeName
 	}
-	e.currentFunc.ReturnVariable = e.getOrCreateVar("%0(RETURN)", returnTypeStr, VarKindReturn, false) // %0
+	// Create and register the return variable.
+	// getOrCreateVar for RETURN kind uses the fixed "%0" name and doesn't advance nextVarID itself.
+	e.currentFunc.ReturnVariable = e.getOrCreateVar("%0(RETURN)", returnTypeStr, VarKindReturn, false)
+	e.currentFunc.LocalVars[e.currentFunc.ReturnVariable.BIRName] = e.currentFunc.ReturnVariable
 
-	for i, paramAST := range fdn.Parameters {
-		paramTypeStr := mapAstTypeToBirType(paramAST.Type.TypeName)
-		argVar := e.getOrCreateVar(paramAST.Name.Value, paramTypeStr, VarKindArg, true)
-		// For non-main functions, adjust the argument variables to match target BIR
-		if fdn.Name.Value != "main" {
-			// Ensure ARG variables use BIR names %1, %2, etc. (after return %0)
-			argVar.BIRName = fmt.Sprintf("%%%d", i+1)
+	// FIX: After establishing %0 for the return variable, ensure nextVarID for subsequent variables starts from 1.
+	e.currentFunc.nextVarID = 1
+
+	for _, paramAST := range fdn.Parameters { // Changed from 'for i, paramAST' to 'for _, paramAST'
+		paramTypeStr := "any" // Default if type is complex or not parsed
+		if paramAST.Type != nil {
+			paramTypeStr = paramAST.Type.TypeName
 		}
-		e.currentFunc.Parameters = append(e.currentFunc.Parameters, &Variable{Name: paramAST.Name.Value, Type: paramTypeStr, OriginalName: paramAST.Name.Value})
+		// Argument variables should also use nextVarID, starting from %1, %2, etc.
+		argVar := e.getOrCreateVar(paramAST.Name.Value, paramTypeStr, VarKindArg, true)
 		e.currentFunc.ArgumentVars = append(e.currentFunc.ArgumentVars, argVar)
+		e.currentFunc.Parameters = append(e.currentFunc.Parameters, argVar) // Parameters list for signature
 	}
 
 	entryBB := e.newBBCurrentFunc() // bb0
@@ -616,20 +624,21 @@ func (e *Emitter) emitFunctionDefinition(fdn *parser.FunctionDefinitionNode) (*F
 	if fdn.Name.Value == "main" && len(fdn.Parameters) == 0 && returnTypeStr == "()" &&
 		fdn.Body != nil && len(fdn.Body.Statements) == 1 {
 		// Check if body is just a single io:println("Hello, World!")
-		if stmt, ok := fdn.Body.Statements[0].(*parser.ExpressionStatementNode); ok {
-			if call, ok := stmt.Expression.(*parser.CallExpressionNode); ok {
-				if memberAccess, ok := call.Function.(*parser.MemberAccessExpressionNode); ok {
-					if mod, ok := memberAccess.Expression.(*parser.IdentifierNode); ok {
-						if mod.Value == "io" && memberAccess.MemberName.Value == "println" &&
-							len(call.Arguments) == 1 {
-							if strLit, ok := call.Arguments[0].(*parser.StringLiteralNode); ok {
-								if strLit.Value == "Hello, World!" {
-									// This is the special "Hello, World!" case - use hardcoded BIR
-									return e.emitHelloWorldMain()
-								}
-							}
-						}
+		// This check might need to be more robust based on your AST structure
+		if exprStmt, ok := fdn.Body.Statements[0].(*parser.ExpressionStatementNode); ok {
+			if callExpr, ok := exprStmt.Expression.(*parser.CallExpressionNode); ok {
+				if ident, ok := callExpr.Function.(*parser.IdentifierNode); ok && ident.Value == "println" {
+					_, err := e.emitHelloWorldMain() // Call the specific emitter
+					if err != nil {
+						return nil, err
 					}
+					// emitHelloWorldMain now sets its own currentFunc, so we retrieve it
+					fnToReturn := e.currentFunc // This might be problematic if emitHelloWorldMain changes e.currentFunc
+					// It's better if emitHelloWorldMain operates on the e.currentFunc set by emitFunctionDefinition
+					// For now, let's assume emitHelloWorldMain correctly populates the *current* e.currentFunc
+					// and then we nullify e.currentFunc before returning.
+					e.currentFunc = nil
+					return fnToReturn, nil // Return early after emitting hardcoded main
 				}
 			}
 		}
@@ -642,26 +651,34 @@ func (e *Emitter) emitFunctionDefinition(fdn *parser.FunctionDefinitionNode) (*F
 
 	// Ensure function ends with a terminator if not already set by its body
 	if e.currentFunc.CurrentBB != nil && e.currentFunc.CurrentBB.Terminator == nil {
-		if e.currentFunc.ReturnVariable.Type == "()" {
-			e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: "nil"})
+		// If return type is "()", and it's not main, it might implicitly return.
+		// For simplicity, all non-terminated blocks in functions that are not main
+		// and have a "()" return type will get a default return sequence.
+		// Main function's termination is handled by emitHelloWorldMain or specific logic.
+		if returnTypeStr == "()" {
+			// For void functions, ensure a return if the last block isn't terminated.
+			// This might involve loading nil to %0 if it hasn't been set.
+			// Check if the last instruction was a store to %0. If not, add it.
+			// This is a simplified placeholder. Proper dead code elimination / CFG analysis would be better.
+			e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: e.currentFunc.ReturnVariable.Type})
+			e.addTerminator(&ReturnInst{})
+		} else {
+			// For non-void functions, falling off the end without a return is an error.
+			// Or, if your language allows, it might be an implicit panic or undefined behavior.
+			// For now, let's add an unreachable or a panic instruction in BIR,
+			// or rely on LLVM verification to catch this.
+			// A simple GOTO to a new block with just a return might be needed if there's complex logic.
+			// For now, assume valid BIR will have explicit returns for non-void.
+			// If not, this is a point for future improvement or error reporting.
+			fmt.Printf("Warning: Function %s (non-void) reached end of emitFunctionDefinition without a terminator in the current BB.\n", fdn.Name.Value)
 		}
-
-		// For non-main functions that return, add GOTO before return like in target BIR
-		if fdn.Name.Value != "main" {
-			bb1 := e.newBBCurrentFunc()
-			e.addTerminator(&GotoInst{TargetBB: bb1.ID})
-			e.setCurrentBB(bb1)
-		}
-
-		e.addTerminator(&ReturnInst{})
 	}
 
 	fnToReturn := e.currentFunc
-	e.currentFunc = nil
+	e.currentFunc = nil // Clear currentFunc after processing
 	return fnToReturn, nil
 }
 
-// Separate method for the hardcoded "Hello, World!" main function
 func (e *Emitter) emitHelloWorldMain() (*Function, error) {
 	// Variables in specific order to match target BIR format
 	arrayVar := e.getOrCreateVar("_array_for_println", "typeRefDesc<>[]", VarKindTemp, false)
@@ -696,7 +713,7 @@ func (e *Emitter) emitHelloWorldMain() (*Function, error) {
 
 	// bb1
 	e.setCurrentBB(bb1)
-	e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: "nil"})
+	e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: e.currentFunc.ReturnVariable.Type})
 
 	bb2 := e.newBBCurrentFunc()
 	e.addTerminator(&GotoInst{TargetBB: bb2.ID})

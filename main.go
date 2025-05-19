@@ -5,7 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"wx-yz/lightfoot/backend"
 	"wx-yz/lightfoot/bir"
 	"wx-yz/lightfoot/compiler"
 )
@@ -65,84 +68,83 @@ func printFunctionBIR(fn *bir.Function) {
 	fmt.Printf("}\n")
 }
 
-func printBIR(birPackage *bir.Package) {
-	fmt.Println("================ Emitting Module ================")
-	fmt.Printf("module %s/%s v %s;\n", birPackage.OrgName, birPackage.Name, birPackage.Version)
-	fmt.Println() // Blank line
+func main() {
+	// Parse command line arguments
+	inputFile := flag.String("input", "", "Input Ballerina source file")
+	outputFile := flag.String("output", "", "Output object file")
+	execFile := flag.String("exec", "", "Output executable file")
+	showBIR := flag.Bool("show-bir", false, "Show BIR output")
+	noLink := flag.Bool("no-link", false, "Don't link into executable")
+	flag.Parse()
 
-	for _, imp := range birPackage.ImportModules {
-		fmt.Printf("import %s/%s v %s;\n", imp.OrgName, imp.PackageName, imp.Version)
+	if *inputFile == "" {
+		fmt.Println("Error: Input file is required")
+		flag.Usage()
+		os.Exit(1)
 	}
-	// Target BIR has one blank line after imports, then $annotation_data, then one blank line.
-	fmt.Println() // One blank line after all imports
 
-	if birPackage.AnnotationData != nil {
-		fmt.Printf("%s %s;\n", birPackage.AnnotationData.Name, birPackage.AnnotationData.Type)
-		fmt.Println() // One blank line after AnnotationData
-	} else {
-		// If no annotation data, maybe still print a blank line if imports were present
-		if len(birPackage.ImportModules) > 0 {
-			fmt.Println() // Ensure a blank line before functions if only imports were present
+	// Set default output file name if not specified
+	if *outputFile == "" {
+		*outputFile = strings.TrimSuffix(*inputFile, ".bal") + ".o"
+	}
+
+	// Set default executable name if not specified
+	if *execFile == "" {
+		// Remove extension and add platform-specific executable extension
+		base := strings.TrimSuffix(*inputFile, filepath.Ext(*inputFile))
+		if runtime.GOOS == "windows" {
+			*execFile = base + ".exe"
+		} else {
+			*execFile = base
 		}
 	}
 
-	// Print lifecycle functions first
-	if birPackage.ModuleInitFunc != nil {
-		printFunctionBIR(birPackage.ModuleInitFunc)
-	}
-	if birPackage.ModuleStartFunc != nil {
-		printFunctionBIR(birPackage.ModuleStartFunc)
-	}
-	if birPackage.ModuleStopFunc != nil {
-		printFunctionBIR(birPackage.ModuleStopFunc)
-	}
-
-	// Print other functions
-	for _, fn := range birPackage.Functions {
-		printFunctionBIR(fn)
-	}
-	fmt.Println("\n================ Emitting Module ================")
-}
-
-func main() {
-	// Define command line flags
-	dumpBIR := flag.Bool("dump-bir", false, "Output the Ballerina Intermediate Representation")
-
-	// Parse flags
-	flag.Parse()
-
-	// Check if there's a Ballerina file specified after the flags
-	args := flag.Args()
-	if len(args) < 1 {
-		fmt.Println("Usage: lightfoot [--dump-bir] <file.bal>")
-		os.Exit(1)
-	}
-
-	filePath := args[0]
-	sourceCode, err := os.ReadFile(filePath)
+	// Read input file
+	input, err := os.ReadFile(*inputFile)
 	if err != nil {
-		fmt.Printf("Error reading file %s: %v\n", filePath, err)
+		fmt.Printf("Error reading input file: %v\n", err)
 		os.Exit(1)
 	}
 
-	comp := compiler.NewCompiler()
-	birPackage, errP := comp.Compile(string(sourceCode))
-	if errP != nil {
-		fmt.Printf("Compilation failed:\n%v", errP)
+	// Compile to BIR
+	birPackage, err := compiler.Compile(string(input))
+	if err != nil {
+		fmt.Printf("Error compiling to BIR: %v\n", err)
 		os.Exit(1)
 	}
 
-	if birPackage == nil {
-		fmt.Println("No BIR package generated.")
-		return
+	// Show BIR if requested
+	if *showBIR {
+		fmt.Println("BIR Output:")
+		for _, fn := range birPackage.Functions {
+			printFunctionBIR(fn)
+		}
+		if birPackage.ModuleInitFunc != nil {
+			printFunctionBIR(birPackage.ModuleInitFunc)
+		}
+		if birPackage.ModuleStartFunc != nil {
+			printFunctionBIR(birPackage.ModuleStartFunc)
+		}
+		if birPackage.ModuleStopFunc != nil {
+			printFunctionBIR(birPackage.ModuleStopFunc)
+		}
 	}
 
-	// Only output BIR if the flag is set
-	if *dumpBIR {
-		printBIR(birPackage)
-	} else {
-		fmt.Printf("Successfully compiled %s\n", filePath)
-		// Here you would normally perform other actions with the compiled code
-		// Such as further compilation stages, execution, etc.
+	// Generate native code
+	codeGen := backend.NewCodeGenerator(birPackage)
+	if err := codeGen.GenerateCode(*outputFile); err != nil {
+		fmt.Printf("Error generating code: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Successfully generated object file: %s\n", *outputFile)
+
+	// Link object file into executable if requested
+	if !*noLink {
+		if err := backend.LinkObjectFile(*outputFile, *execFile); err != nil {
+			fmt.Printf("Error linking executable: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Successfully generated executable: %s\n", *execFile)
 	}
 }

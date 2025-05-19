@@ -50,3 +50,9 @@ func (c *Compiler) Compile(source string) (*bir.Package, error) {
 
 	return birPackage, nil
 }
+
+// Compile is a package-level function that creates a compiler instance and compiles the source.
+func Compile(source string) (*bir.Package, error) {
+	c := NewCompiler()
+	return c.Compile(source)
+}
