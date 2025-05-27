@@ -85,9 +85,17 @@ func (cg *CodeGenerator) AddRuntimeFunctions() {
 	printlnFunc := cg.module.NewFunc("ballerina_io_println", types.Void, ir.NewParam("value", ballerinaStringTypePtr))
 
 	ballerinaArrayTypePtr := types.NewPointer(cg.structTypes["BallerinaArray"])
+	// Add the array println function declaration
+	printlnArrayFunc := cg.module.NewFunc("ballerina_io_println_array", types.Void, ir.NewParam("array", ballerinaArrayTypePtr))
 	arrayNewFunc := cg.module.NewFunc("ballerina_lang_array_new",
 		ballerinaArrayTypePtr,
 		ir.NewParam("size", types.I64), ir.NewParam("elementSize", types.I64))
+
+	// Array set function declaration
+	arraySetFunc := cg.module.NewFunc("ballerina_lang_array_set", types.Void,
+		ir.NewParam("arr", ballerinaArrayTypePtr),
+		ir.NewParam("index", types.I64),
+		ir.NewParam("value", types.I8Ptr)) // void* becomes i8*
 
 	// For string concat, parameters should also be BallerinaString*
 	// The C function ballerina_lang_string_concat takes BallerinaString*
@@ -115,8 +123,14 @@ func (cg *CodeGenerator) AddRuntimeFunctions() {
 	cg.functions["ballerina.io.println"] = printlnFunc // Original BIR name
 	cg.functions["ballerina_io_println"] = printlnFunc // C-style name
 
+	// Add the array println function to the functions map
+	cg.functions["ballerina_io_println_array"] = printlnArrayFunc
+
 	cg.functions["ballerina.lang.array.new"] = arrayNewFunc // Original BIR name
 	cg.functions["ballerina_lang_array_new"] = arrayNewFunc // C-style name
+
+	cg.functions["ballerina.lang.array.set"] = arraySetFunc // Original BIR name
+	cg.functions["ballerina_lang_array_set"] = arraySetFunc // C-style name
 
 	cg.functions["ballerina.lang.string.concat"] = concatFunc // Original BIR name
 	cg.functions["ballerina_lang_string_concat"] = concatFunc // C-style name
@@ -125,6 +139,65 @@ func (cg *CodeGenerator) AddRuntimeFunctions() {
 	cg.functions["ballerina_lang_map_new"] = mapNewFunc // C-style name
 
 	cg.functions[fnNameNewStringLiteral] = newStringLiteralFunc
+
+	// Add ballerina_runtime_int_to_string
+	intToStringFunc := cg.module.NewFunc("ballerina_runtime_int_to_string",
+		ballerinaStringTypePtr, // Returns BallerinaString*
+		ir.NewParam("val", types.I64),
+	)
+	cg.functions["ballerina_runtime_int_to_string"] = intToStringFunc
+
+	// Add ballerina_runtime_bool_to_string
+	boolToStringFunc := cg.module.NewFunc("ballerina_runtime_bool_to_string",
+		ballerinaStringTypePtr, // Returns BallerinaString*
+		ir.NewParam("val", types.I1),
+	)
+	cg.functions["ballerina_runtime_bool_to_string"] = boolToStringFunc
+
+	// HTTP Server Functions
+	if _, ok := cg.functions["ballerina_http_server_start"]; !ok {
+		fn := cg.module.NewFunc("ballerina_http_server_start", types.I32, ir.NewParam("port", types.I32), ir.NewParam("register_service_handlers_now", types.I32))
+		cg.functions["ballerina_http_server_start"] = fn
+	}
+
+	httpReqPtrType := types.NewPointer(cg.structTypes["BallerinaHTTPRequest"])
+	httpRespPtrType := types.NewPointer(cg.structTypes["BallerinaHTTPResponse"])
+
+	// ballerina_resource_func_ptr is void (*)(BallerinaHTTPRequest*, BallerinaHTTPResponse*)
+	// In LLVM, this is a pointer to a function: void (BallerinaHTTPRequest*, BallerinaHTTPResponse*)*
+	resourceFuncSig := types.NewFunc(types.Void, httpReqPtrType, httpRespPtrType)
+	resourceFuncPtrType := types.NewPointer(resourceFuncSig)
+
+	if _, ok := cg.functions["ballerina_http_register_resource"]; !ok {
+		fn := cg.module.NewFunc("ballerina_http_register_resource", types.Void,
+			ir.NewParam("path", types.I8Ptr),
+			ir.NewParam("method", types.I8Ptr),
+			ir.NewParam("handler", resourceFuncPtrType),
+		)
+		cg.functions["ballerina_http_register_resource"] = fn
+	}
+
+	// HTTP Response utility functions
+	if _, ok := cg.functions["ballerina_http_response_set_string_body"]; !ok {
+		fn := cg.module.NewFunc("ballerina_http_response_set_string_body", types.Void,
+			ir.NewParam("resp", httpRespPtrType),
+			ir.NewParam("body_str", types.NewPointer(cg.structTypes["BallerinaString"])),
+		)
+		cg.functions["ballerina_http_response_set_string_body"] = fn
+	}
+	if _, ok := cg.functions["ballerina_http_response_set_status_code"]; !ok {
+		fn := cg.module.NewFunc("ballerina_http_response_set_status_code", types.Void,
+			ir.NewParam("resp", httpRespPtrType),
+			ir.NewParam("status_code", types.I32),
+		)
+		cg.functions["ballerina_http_response_set_status_code"] = fn
+	}
+	if _, ok := cg.functions["ballerina_http_request_get_placeholder_body"]; !ok {
+		fn := cg.module.NewFunc("ballerina_http_request_get_placeholder_body", types.NewPointer(cg.structTypes["BallerinaString"]),
+			ir.NewParam("req", httpReqPtrType),
+		)
+		cg.functions["ballerina_http_request_get_placeholder_body"] = fn
+	}
 }
 
 // AddRuntimeTypes adds runtime type declarations to the module
@@ -150,6 +223,29 @@ func (cg *CodeGenerator) AddRuntimeTypes() {
 		types.I8Ptr, // data
 	)
 	cg.structTypes["BallerinaMap"] = mapType
+
+	// HTTP Request Object (simplified)
+	if _, ok := cg.structTypes["BallerinaHTTPRequest"]; !ok {
+		ballerinaHTTPRequestType := types.NewStruct(
+			types.I8Ptr, // path
+			types.I8Ptr, // method
+			types.NewPointer(cg.structTypes["BallerinaString"]), // placeholder_body
+			// Add more fields corresponding to BallerinaHTTPRequest in C
+		)
+		cg.module.NewTypeDef("BallerinaHTTPRequest", ballerinaHTTPRequestType)
+		cg.structTypes["BallerinaHTTPRequest"] = ballerinaHTTPRequestType
+	}
+
+	// HTTP Response Object (simplified)
+	if _, ok := cg.structTypes["BallerinaHTTPResponse"]; !ok {
+		ballerinaHTTPResponseType := types.NewStruct(
+			types.I32, // status_code
+			types.NewPointer(cg.structTypes["BallerinaString"]), // body
+			// Add more fields corresponding to BallerinaHTTPResponse in C
+		)
+		cg.module.NewTypeDef("BallerinaHTTPResponse", ballerinaHTTPResponseType)
+		cg.structTypes["BallerinaHTTPResponse"] = ballerinaHTTPResponseType
+	}
 }
 
 // AddRuntimeGlobals adds runtime global variables to the module
@@ -164,27 +260,6 @@ func (cg *CodeGenerator) AddRuntimeInit() {
 
 // Helper functions for runtime operations
 
-// CreateString creates a new Ballerina string
-func (cg *CodeGenerator) CreateString(str string, block *ir.Block) value.Value {
-	// Create a global string constant with null terminator
-	strConst := cg.module.NewGlobalDef("", constant.NewCharArrayFromString(str+"\x00"))
-
-	// Call runtime function to create the string
-	strLen := constant.NewInt(types.I64, int64(len(str)))
-	newStringFunc := cg.functions["ballerina_string_new_with_literal"]
-	if newStringFunc == nil {
-		panic("ballerina_string_new_with_literal function not found")
-	}
-
-	// Get pointer to first character of the string constant
-	zero := constant.NewInt(types.I32, 0)
-	indices := []constant.Constant{zero, zero}
-	charPtr := constant.NewGetElementPtr(strConst.Type().(*types.PointerType).ElemType, strConst, indices...)
-
-	// Call the runtime function to create a proper BallerinaString
-	return block.NewCall(newStringFunc, charPtr, strLen)
-}
-
 // CreateArray creates a new Ballerina array
 func (cg *CodeGenerator) CreateArray(size int64, elementType types.Type, block *ir.Block) value.Value {
 	// Call runtime function to create array
@@ -193,9 +268,9 @@ func (cg *CodeGenerator) CreateArray(size int64, elementType types.Type, block *
 		panic("array.new function not found")
 	}
 	sizeVal := constant.NewInt(types.I64, size)
-	elementSize := constant.NewInt(types.I64, cg.getSizeOfType(elementType))
+	elementSizeVal := constant.NewInt(types.I64, cg.getSizeOfType(elementType)) // Use the new method
 
-	return block.NewCall(arrayFunc, sizeVal, elementSize)
+	return block.NewCall(arrayFunc, sizeVal, elementSizeVal)
 }
 
 // CreateMap creates a new Ballerina map

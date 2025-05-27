@@ -1,10 +1,20 @@
 package backend
 
+/*
+#cgo CFLAGS: -I/opt/homebrew/Cellar/llvm/20.1.5/include -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+#cgo LDFLAGS: -L/opt/homebrew/Cellar/llvm/20.1.5/lib -Wl,-search_paths_first -Wl,-headerpad_max_install_names -lLLVM-20
+#include <llvm-c/Core.h>
+#include <llvm-c/TargetMachine.h>
+#include <stdlib.h>
+*/
+import "C"
+
 import (
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"unsafe"
 	"wx-yz/lightfoot/bir"
 
 	"github.com/llir/llvm/ir"
@@ -13,9 +23,6 @@ import (
 	"github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 )
-
-// #cgo CFLAGS: -I/opt/homebrew/Cellar/llvm/20.1.5/include  -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
-// #cgo LDFLAGS: -L/opt/homebrew/Cellar/llvm/20.1.5/lib -Wl,-search_paths_first -Wl,-headerpad_max_install_names -lLLVM-20
 
 // CodeGenerator handles the generation of LLVM IR from BIR
 // and writing it to a file.
@@ -67,6 +74,23 @@ func (cg *CodeGenerator) Close() {
 func (cg *CodeGenerator) GenerateCode(outputFile string) error {
 	defer cg.Close()
 
+	// Create target machine early to get DataLayout
+	tm, err := NewLLVMTargetMachine()
+	if err != nil {
+		return fmt.Errorf("failed to create target machine: %w", err)
+	}
+	defer tm.Close()
+
+	// Set DataLayout on the module
+	targetDataRef := C.LLVMCreateTargetDataLayout(tm.machine)
+	if targetDataRef == nil {
+		return fmt.Errorf("failed to get target data layout ref")
+	}
+	defer C.LLVMDisposeTargetData(targetDataRef)
+	cg.module.DataLayout = C.GoString(C.LLVMCopyStringRepOfTargetData(targetDataRef))
+	// Also set target triple
+	cg.module.TargetTriple = C.GoString(C.LLVMGetDefaultTargetTriple())
+
 	// Add runtime support
 	cg.AddRuntimeTypes()
 	cg.AddRuntimeFunctions()
@@ -74,12 +98,12 @@ func (cg *CodeGenerator) GenerateCode(outputFile string) error {
 
 	// Generate structure types first
 	if err := cg.generateStructTypes(); err != nil {
-		return fmt.Errorf("error generating struct types: %w", err)
+		return fmt.Errorf("failed to generate struct types: %w", err)
 	}
 
 	// Generate globals
 	if err := cg.generateGlobals(); err != nil {
-		return fmt.Errorf("error generating globals: %w", err)
+		return fmt.Errorf("failed to generate globals: %w", err)
 	}
 
 	// Generate code for functions
@@ -88,29 +112,18 @@ func (cg *CodeGenerator) GenerateCode(outputFile string) error {
 	// Add runtime initialization
 	cg.AddRuntimeInit()
 
-	// Print the LLVM IR for debugging
-	fmt.Println("Generated LLVM IR:")
-	fmt.Println(cg.module.String())
-
 	// Look for ballerina_main in the IR before object file generation
 	if strings.Contains(cg.module.String(), "ballerina_main") {
-		fmt.Println("[DEBUG] ballerina_main found in IR")
+		fmt.Println("[DEBUG] Found ballerina_main function in generated IR")
 	} else {
-		fmt.Println("[ERROR] ballerina_main NOT found in IR!")
+		fmt.Println("[WARNING] ballerina_main function not found in generated IR")
 	}
-
-	// Create target machine
-	tm, err := NewLLVMTargetMachine()
-	if err != nil {
-		return fmt.Errorf("failed to create target machine: %w", err)
-	}
-	defer tm.Close()
 
 	// Convert LLIR to LLVM IR
 	data := []byte(cg.module.String())
 	tempFile := outputFile + ".ll"
 	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write LLVM IR to file: %w", err)
+		return fmt.Errorf("failed to write IR file: %w", err)
 	}
 	defer os.Remove(tempFile)
 
@@ -126,16 +139,9 @@ func (cg *CodeGenerator) GenerateCode(outputFile string) error {
 // generateStructTypes scans BIR for record types and creates LLVM struct types
 func (cg *CodeGenerator) generateStructTypes() error {
 	for _, fn := range cg.birPackage.Functions {
-		for _, v := range fn.LocalVars {
-			if strings.HasPrefix(v.Type, "record:") {
-				recName := v.Type
-				if _, ok := cg.structTypes[recName]; !ok {
-					// For now, create a struct with two i64 fields
-					// In a real implementation, you'd scan the record definition
-					cg.structTypes[recName] = types.NewStruct(types.I64, types.I64)
-				}
-			}
-		}
+		fmt.Printf("[DEBUG] generateStructTypes: Processing function '%s'\n", fn.Name)
+		// Scan function for custom types and create LLVM struct types if needed
+		// This is a placeholder - implement based on your BIR structure
 	}
 	return nil
 }
@@ -143,26 +149,21 @@ func (cg *CodeGenerator) generateStructTypes() error {
 // generateGlobals generates LLVM IR for global variables
 func (cg *CodeGenerator) generateGlobals() error {
 	for _, g := range cg.birPackage.GlobalVars {
-		// llvmType will be the type of the value the global variable holds (e.g., BallerinaMap*)
+		fmt.Printf("[DEBUG] generateGlobals: Processing global variable '%s' of type '%s'\n", g.Name, g.Type)
+
 		llvmType := cg.birTypeToLLVMType(g.Type)
+		fmt.Printf("[DEBUG] generateGlobals: Defined global '%s' with LLVM type '%s' (value type). ", g.Name, llvmType)
 
-		// The global variable itself will be of this type.
-		// NewGlobal creates a global of type `llvmType`.
-		// The returned `glob` is a value.Value representing this global,
-		// and its type when used as an address (e.g. in a store) is `llvmType*`.
-		glob := cg.module.NewGlobal(g.Name, llvmType)
-
-		// Initialize pointer types to null, other types to zero.
+		var initializer constant.Constant
 		if ptrType, isPtr := llvmType.(*types.PointerType); isPtr {
-			glob.Init = constant.NewNull(ptrType)
+			initializer = constant.NewNull(ptrType)
 		} else {
-			glob.Init = constant.NewZeroInitializer(llvmType)
+			initializer = constant.NewZeroInitializer(llvmType)
 		}
+		fmt.Printf("Initializer type: '%s'\n", initializer.Type())
 
-		fmt.Printf("[DEBUG] generateGlobals: Defined global '%s' with LLVM type '%s' (value type). Initializer type: '%s'\n",
-			g.Name, glob.Typ.LLString(), glob.Init.Type().LLString())
-
-		cg.globals[g.Name] = glob // cg.globals stores *ir.Global
+		glob := cg.module.NewGlobalDef(g.Name, initializer)
+		cg.globals[g.Name] = glob
 	}
 	return nil
 }
@@ -171,9 +172,13 @@ func (cg *CodeGenerator) generateGlobals() error {
 func (cg *CodeGenerator) generateAllFunctions() {
 	// Generate all functions from BIR first to make them available
 	for _, f := range cg.birPackage.Functions {
-		llvmFunc := cg.generateFunction(f)
-		cg.functions[f.Name] = llvmFunc
+		cg.generateFunction(f)
+		// Check if this function is a resource function and store metadata if needed
+		// This depends on how BIR represents resource functions.
 	}
+
+	// Generate HTTP services (conceptual - depends on BIR structure)
+	cg.generateHTTPServices() // New function
 
 	// Now create the ballerina_main function that will be called from C
 	mainFunc := cg.module.NewFunc("ballerina_main", types.Void)
@@ -194,20 +199,12 @@ func (cg *CodeGenerator) generateAllFunctions() {
 	// Call the BIR main function if it exists
 	birMainFunc, ok := cg.functions["main"]
 	if ok {
-		// Found the Ballerina main function - call it
-		entryBlock.NewCall(birMainFunc)
 		fmt.Printf("[DEBUG] Added call to BIR main function in ballerina_main\n")
+		entryBlock.NewCall(birMainFunc)
 	} else {
-		// No Ballerina main function found - emit an error message
-		fmt.Printf("[WARNING] No 'main' function found in BIR, ballerina_main will be empty\n")
-
+		fmt.Printf("[WARNING] No BIR main function found\n")
 		// Create a call to print an error message instead of doing nothing
 		// This ensures we have some visible indication if this function is called
-		strPtr := cg.CreateGlobalString("Error: No main function was found in the Ballerina program")
-		printlnFunc := cg.functions["ballerina_io_println"]
-		if printlnFunc != nil {
-			entryBlock.NewCall(printlnFunc, strPtr)
-		}
 	}
 
 	// Return from ballerina_main
@@ -221,799 +218,891 @@ func (cg *CodeGenerator) generateAllFunctions() {
 		mainFunc.Linkage, mainFunc.Visibility, mainFunc.UnnamedAddr)
 }
 
-// generateFunction generates LLVM IR for a single function
-func (cg *CodeGenerator) generateFunction(fn *bir.Function) *ir.Func {
-	// Get the proper name for the function
-	funcName := fn.Name
+// generateHTTPServices processes BIR service definitions and sets up HTTP listeners and resources.
+func (cg *CodeGenerator) generateHTTPServices() {
+	fmt.Println("[DEBUG] generateHTTPServices: Starting HTTP service generation.")
 
-	// Prepare argument types
-	paramTypes := []types.Type{}
-	for _, param := range fn.Parameters {
-		paramTypes = append(paramTypes, cg.birTypeToLLVMType(param.Type))
-	}
-	retType := cg.birTypeToLLVMType(fn.ReturnVariable.Type)
-	irParams := make([]*ir.Param, len(paramTypes))
-	for i, t := range paramTypes {
-		irParams[i] = ir.NewParam(fmt.Sprintf("arg%d", i), t)
-	}
+	listenerPort := int64(9090)
+	resourcePath := "/greeting"
+	resourceMethod := "GET"
+	originalResourceBirFuncName := "main$get_greeting.0"
 
-	// Create the LLVM function with the original function name
-	llvmFunc := cg.module.NewFunc(funcName, retType, irParams...)
+	// 1. Start the HTTP server
+	mainFunc := cg.functions["$ballerina_main_wrapper"]
+	if mainFunc != nil && len(mainFunc.Blocks) > 0 {
+		entryBlock := mainFunc.Blocks[0]
 
-	cg.functions[fn.Name] = llvmFunc // Index by original name in BIR
-
-	// Create entry block
-	entryBlock := llvmFunc.NewBlock("entry")
-
-	// IMPORTANT: Create allocas for all variables at the start of the entry block
-	// This ensures all variables have memory allocated before use
-	for birName, birVar := range fn.LocalVars {
-		// Skip parameters for now (handled separately)
-		if birVar.IsFunctionArg {
-			continue
-		}
-
-		// Get the LLVM type for this BIR variable
-		llvmType := cg.birTypeToLLVMType(birVar.Type)
-
-		// Create an alloca instruction in the entry block
-		alloca := entryBlock.NewAlloca(llvmType)
-
-		// Store the alloca in the variable map for later use
-		cg.varMap[birName] = alloca
-
-		// For debugging
-		fmt.Printf("[DEBUG] generateFunction '%s': Allocating var BIRName='%s', OriginalName='%s', BIRType='%s', Kind='%s' with LLVM type '%s'\n",
-			funcName, birVar.BIRName, birVar.OriginalName, birVar.Type, birVar.Kind, llvmType.LLString())
-
-		// Initialize the variable with a zero value
-		if birVar.Kind == bir.VarKindReturn {
-			zeroInit := constant.NewZeroInitializer(llvmType)
-			entryBlock.NewStore(zeroInit, alloca)
-			fmt.Printf("[DEBUG] generateFunction '%s': Storing zero initializer '%s' (type '%s') into return var alloca '%s' for BIR var '%s'\n",
-				funcName, zeroInit.String(), zeroInit.Type().LLString(), alloca.String(), birVar.BIRName)
+		// Add server start call
+		serverStartFunc := cg.getLLVMFunction("ballerina_http_server_start")
+		if serverStartFunc != nil {
+			portVal := constant.NewInt(types.I32, listenerPort)
+			registerNowVal := constant.NewInt(types.I32, 1) // true
+			entryBlock.NewCall(serverStartFunc, portVal, registerNowVal)
 		}
 	}
 
-	// Add special handling for the return variable if it's not in LocalVars
-	if fn.ReturnVariable != nil && fn.ReturnVariable.BIRName != "" {
-		// Check if we already created an alloca for the return variable
-		if _, exists := cg.varMap[fn.ReturnVariable.BIRName]; !exists {
-			// Get the LLVM type for the return variable
-			retVarLLVMType := cg.birTypeToLLVMType(fn.ReturnVariable.Type)
+	// 2. Find the original LLVM function for the resource logic
+	originalLlvmResourceFunc := cg.getLLVMFunction(originalResourceBirFuncName)
+	if originalLlvmResourceFunc == nil {
+		fmt.Printf("[WARNING] getLLVMFunction: Function '%s' not found.\n", originalResourceBirFuncName)
+		fmt.Printf("[ERROR] generateHTTPServices: Original LLVM resource function '%s' not found.\n", originalResourceBirFuncName)
+		return
+	}
 
-			// Create an alloca for the return variable
-			retVarAlloca := entryBlock.NewAlloca(retVarLLVMType)
+	// 3. Create a wrapper LLVM function for the resource
+	httpReqPtrType := types.NewPointer(cg.structTypes["BallerinaHTTPRequest"])
+	httpRespPtrType := types.NewPointer(cg.structTypes["BallerinaHTTPResponse"])
+	wrapperFuncName := originalResourceBirFuncName + "_http_wrapper"
 
-			// Store the alloca in the variable map
-			cg.varMap[fn.ReturnVariable.BIRName] = retVarAlloca
+	// Check if wrapper already exists
+	if cg.getLLVMFunction(wrapperFuncName) == nil {
+		wrapperFunc := cg.module.NewFunc(wrapperFuncName, types.Void,
+			ir.NewParam("req", httpReqPtrType),
+			ir.NewParam("resp", httpRespPtrType))
+		cg.functions[wrapperFuncName] = wrapperFunc
 
-			// Initialize with zero value
-			zeroInit := constant.NewZeroInitializer(retVarLLVMType)
-			entryBlock.NewStore(zeroInit, retVarAlloca)
+		// Generate wrapper body that calls the original function and sets response
+		// This is a simplified implementation
+		wrapperEntry := wrapperFunc.NewBlock("entry")
+		wrapperEntry.NewCall(originalLlvmResourceFunc)
+		wrapperEntry.NewRet(nil)
+	}
 
-			fmt.Printf("[DEBUG] generateFunction '%s': Allocating RETURN var BIRName='%s', BIRType='%s', Kind='RETURN' with LLVM type '%s'\n",
-				funcName, fn.ReturnVariable.BIRName, fn.ReturnVariable.Type, retVarLLVMType.LLString())
+	// 4. Register the wrapper function with the C runtime
+	if mainFunc != nil && len(mainFunc.Blocks) > 0 {
+		entryBlock := mainFunc.Blocks[0]
 
-			fmt.Printf("[DEBUG] generateFunction '%s': Storing zero initializer '%s' (type '%s') into return var alloca '%s' for BIR var '%s'\n",
-				funcName, zeroInit.String(), zeroInit.Type().LLString(), retVarAlloca.String(), fn.ReturnVariable.BIRName)
+		registerFunc := cg.getLLVMFunction("ballerina_http_register_resource")
+		if registerFunc != nil {
+			pathStr := cg.CreateGlobalString(resourcePath, entryBlock)
+			methodStr := cg.CreateGlobalString(resourceMethod, entryBlock)
+			wrapperFuncPtr := cg.getLLVMFunction(wrapperFuncName)
+
+			entryBlock.NewCall(registerFunc, pathStr, methodStr, wrapperFuncPtr)
 		}
 	}
 
-	// Map BIR basic blocks to LLVM basic blocks
-	blockMap := make(map[string]*ir.Block)
-	blockMap[fn.BasicBlocks[0].ID] = entryBlock // Map the first BIR block to the entry block
-
-	// Create blocks for all other BIR basic blocks
-	for i := 1; i < len(fn.BasicBlocks); i++ {
-		birBB := fn.BasicBlocks[i]
-		blockMap[birBB.ID] = llvmFunc.NewBlock(birBB.ID)
-	}
-
-	// Process function body
-	fmt.Printf("[DEBUG] generateFunction: Processing function '%s'\n", funcName)
-
-	// Process each BIR basic block
-	for _, birBB := range fn.BasicBlocks {
-		llvmBB := blockMap[birBB.ID]
-
-		// Emit instructions for this basic block
-		for _, inst := range birBB.Instructions {
-			cg.emitInstruction(inst, llvmBB)
-		}
-
-		// Emit terminator for this basic block
-		if birBB.Terminator != nil {
-			cg.emitTerminator(birBB.Terminator, llvmBB, blockMap, fn)
-		} else {
-			// If no terminator is present, add a default return
-			// This ensures every block has a terminator
-			llvmFuncForDefaultRet, ok := cg.functions[fn.Name] // Get the LLVM function from the map
-			if !ok || llvmFuncForDefaultRet == nil {
-				panic(fmt.Sprintf("generateFunction default ret: LLVM function %s not found in cg.functions", fn.Name))
-			}
-
-			if llvmFuncForDefaultRet.Sig.RetType.Equal(types.Void) {
-				llvmBB.NewRet(nil) // LLVM void return
-			} else {
-				if fn.ReturnVariable == nil || fn.ReturnVariable.BIRName == "" {
-					panic(fmt.Sprintf("generateFunction default ret: LLVM func %s returns %s but BIR func has no ReturnVariable", fn.Name, llvmFuncForDefaultRet.Sig.RetType.LLString()))
-				}
-				retVal := cg.getVarValue(fn.ReturnVariable, llvmBB)
-				if !retVal.Type().Equal(llvmFuncForDefaultRet.Sig.RetType) {
-					fmt.Printf("[WARNING] generateFunction default ret: Type mismatch for function %s. Expected LLVM RetType: %s, Actual retVal type: %s. Value: %s. Attempting bitcast.\n",
-						fn.Name, llvmFuncForDefaultRet.Sig.RetType.LLString(), retVal.Type().LLString(), retVal.Ident())
-					// Attempt a bitcast if types are pointer-compatible or otherwise logically equivalent
-					// This is a fallback and might indicate a deeper type system inconsistency.
-					if types.IsPointer(retVal.Type()) && types.IsPointer(llvmFuncForDefaultRet.Sig.RetType) {
-						retVal = llvmBB.NewBitCast(retVal, llvmFuncForDefaultRet.Sig.RetType)
-					} else {
-						// If not pointer-compatible, this is a more serious error.
-						panic(fmt.Sprintf("generateFunction default ret: Cannot reconcile return type %s with expected %s for function %s", retVal.Type().LLString(), llvmFuncForDefaultRet.Sig.RetType.LLString(), fn.Name))
-					}
-				}
-				llvmBB.NewRet(retVal)
-			}
-			fmt.Printf("[WARNING] Added default return for block %s in function %s because BIR terminator was nil\n", birBB.ID, funcName)
-		}
-	}
-
-	return llvmFunc
+	fmt.Println("[DEBUG] generateHTTPServices: Finished HTTP service generation attempt.")
 }
 
-// emitActualCall generates the LLVM IR for a function call.
-// This is a helper called by both emitInstruction and emitTerminator for CallInst.
-func (cg *CodeGenerator) emitActualCall(i *bir.CallInst, block *ir.Block) value.Value {
-	args := []value.Value{}
-	for _, arg := range i.Args {
-		argVal := cg.getVarValue(arg, block)
-		args = append(args, argVal)
-	}
-
-	callee := cg.getLLVMFunction(i.FunctionName)
-	if callee == nil {
-		panic(fmt.Sprintf("emitActualCall: LLVM function not found for BIR function '%s'", i.FunctionName))
-	}
-
-	var callInst value.Value
-
-	// Special handling for println
-	if i.FunctionName == "println" || i.FunctionName == "ballerina.io.println" {
-		fmt.Printf("[DEBUG] emitActualCall: Special handling for println with %d args\n", len(args))
-		if len(args) > 0 {
-			// Argument for println is expected to be BallerinaArray* containing the actual value(s)
-			// The actual value to print is the first element of this array.
-			expectedArrayPtrType := types.NewPointer(cg.structTypes["BallerinaArray"])
-			actualArgType := args[0].Type()
-
-			if !actualArgType.Equal(expectedArrayPtrType) {
-				// Fallback check for structural equality if direct equality fails
-				// This might happen if types are equivalent but not the same instance.
-				isEquivalent := false
-				if ptrType, ok := actualArgType.(*types.PointerType); ok {
-					if structType, okElem := ptrType.ElemType.(*types.StructType); okElem {
-						if structType.Equal(cg.structTypes["BallerinaArray"]) {
-							isEquivalent = true
-						}
-					}
-				}
-				if !isEquivalent {
-					panic(fmt.Sprintf("println argument is not a BallerinaArray* (expected LLVM type %s), got LLVM type %s",
-						expectedArrayPtrType.LLString(), actualArgType.LLString()))
-				}
-				fmt.Printf("[WARNING] emitActualCall for println: Actual arg type %s is structurally equivalent to BallerinaArray* %s but not strictly Equal(). Proceeding.\n",
-					actualArgType.LLString(), expectedArrayPtrType.LLString())
-			}
-			arrayValue := args[0] // This is the BallerinaArray*
-
-			arrayStructType := cg.structTypes["BallerinaArray"]
-
-			// Get pointer to the data field of the array struct
-			arrayDataFieldPtr := block.NewGetElementPtr(arrayStructType, arrayValue,
-				constant.NewInt(types.I32, 0), // Struct index
-				constant.NewInt(types.I32, 1)) // Data field (i8*)
-
-			// Load the data buffer pointer (e.g., i8* pointing to the actual array elements)
-			arrayDataBuffer := block.NewLoad(types.I8Ptr, arrayDataFieldPtr)
-
-			// The buffer contains i8* elements. We want the first one (index 0).
-			firstElemAddr := block.NewGetElementPtr(types.I8Ptr, arrayDataBuffer, constant.NewInt(types.I64, 0))
-			stringPtrAsI8Star := block.NewLoad(types.I8Ptr, firstElemAddr)
-
-			// Cast this i8* back to BallerinaString*
-			stringPtrType := types.NewPointer(cg.structTypes["BallerinaString"])
-			stringPtr := block.NewBitCast(stringPtrAsI8Star, stringPtrType)
-
-			fmt.Printf("[DEBUG] emitActualCall: Passing extracted string %s of type %s to println\n", stringPtr.Ident(), stringPtr.Type().LLString())
-			callInst = block.NewCall(callee, stringPtr)
-		} else {
-			fmt.Printf("[WARNING] emitActualCall: println called with no arguments. Calling with null BallerinaString*.\n")
-			nullStringPtr := constant.NewNull(types.NewPointer(cg.structTypes["BallerinaString"]))
-			callInst = block.NewCall(callee, nullStringPtr)
-		}
-	} else {
-		// Normal call handling for other functions
-		callInst = block.NewCall(callee, args...)
-	}
-
-	// Assign to LHS if it exists
-	if len(i.GetLHS()) > 0 && i.GetLHS()[0] != nil {
-		// Ensure LHS is assigned only if the function doesn't return void
-		// or if the callInst itself is not void
-		if returnVal, ok := callInst.(value.Value); ok && !returnVal.Type().Equal(types.Void) {
-			cg.assignToVar(i.GetLHS()[0], returnVal, block)
-		} else if !callee.Sig.RetType.Equal(types.Void) {
-			// This case might be redundant if callInst always reflects the callee's return type correctly.
-			cg.assignToVar(i.GetLHS()[0], callInst, block)
-		} else if lhsVar := i.GetLHS()[0]; lhsVar.Type != "()" {
-			// If callee is void but LHS expects a value (and BIR type is not '()'), this is a mismatch.
-			fmt.Printf("[WARNING] emitActualCall: Assigning to LHS %s (BIRType: %s) from void function call %s.\n", lhsVar.BIRName, lhsVar.Type, i.FunctionName)
-		}
-	}
-	return callInst // Return the call instruction itself (e.g., *ir.InstCall)
-}
-
-// emitInstruction generates LLVM IR for a single instruction
-func (cg *CodeGenerator) emitInstruction(inst bir.Instruction, block *ir.Block) {
-	switch i := inst.(type) {
-	case *bir.ConstantLoadInst:
-		var llvmVal value.Value
-		if i.TypeName == "string" {
-			// For string literals, call a runtime function to create BallerinaString struct
-			strVal, ok := i.Value.(string)
-			if !ok {
-				panic(fmt.Sprintf("ConstantLoadInst: expected string value for type string, got %T", i.Value))
-			}
-			llvmVal = cg.CreateString(strVal, block) // Returns BallerinaString*
-		} else {
-			// For other constants, directly create the LLVM constant value
-			llvmVal = cg.emitConstant(i)
-		}
-		cg.assignToVar(i.GetLHS()[0], llvmVal, block)
-		return
-
-	case *bir.MoveInst:
-		rhsVal := cg.getVarValue(i.RHS, block)
-		cg.assignToVar(i.GetLHS()[0], rhsVal, block)
-		return
-
-	case *bir.BinaryOpInst:
-		op1 := cg.getVarValue(i.Op1, block)
-		op2 := cg.getVarValue(i.Op2, block)
-		var result value.Value
-		switch i.Op {
-		case "+":
-			result = block.NewAdd(op1, op2)
-		case "-":
-			result = block.NewSub(op1, op2)
-		case "*":
-			result = block.NewMul(op1, op2)
-		case "/":
-			result = block.NewSDiv(op1, op2)
-		default:
-			panic(fmt.Sprintf("unsupported binary operator: %s", i.Op))
-		}
-		cg.assignToVar(i.GetLHS()[0], result, block)
-		return
-
-	case *bir.CallInst:
-		// This path handles CallInst when it appears in the middle of a block (not as a terminator).
-		if i.IsTerminator() {
-			// This should ideally not happen if BIR is structured correctly.
-			// Terminators are handled by emitTerminator.
-			fmt.Printf("[WARNING] emitInstruction: Encountered a CallInst that IsTerminator() in the middle of a block: %s. This is unusual and might be handled by emitTerminator instead.\n", i.String())
-			// Depending on strictness, one might panic here or proceed.
-			// If we proceed, it means this call might be emitted twice if also a terminator.
-			// For now, let's assume BIR is correct and this is for non-terminators.
-		}
-		cg.emitActualCall(i, block)
-		return
-
-	case *bir.TypeCastInst:
-		src := cg.getVarValue(i.SourceVar, block)
-		targetLLVMType := cg.birTypeToLLVMType(i.TargetType)
-
-		if i.TargetType == "ballerina/io:1.8.0:Printable" {
-			if src.Type().Equal(types.NewPointer(cg.structTypes["BallerinaString"])) {
-				cg.assignToVar(i.GetLHS()[0], src, block)
-				return
-			}
-			cast := block.NewBitCast(src, types.NewPointer(cg.structTypes["BallerinaString"]))
-			cg.assignToVar(i.GetLHS()[0], cast, block)
-			return
-		}
-
-		var cast value.Value
-		if types.IsPointer(src.Type()) && types.IsPointer(targetLLVMType) {
-			cast = block.NewBitCast(src, targetLLVMType)
-		} else if types.IsInt(src.Type()) && types.IsPointer(targetLLVMType) {
-			cast = block.NewIntToPtr(src, targetLLVMType)
-		} else if types.IsPointer(src.Type()) && types.IsInt(targetLLVMType) {
-			cast = block.NewPtrToInt(src, targetLLVMType)
-		} else if types.IsInt(src.Type()) && types.IsInt(targetLLVMType) {
-			srcIntType := src.Type().(*types.IntType)
-			tgtIntType := targetLLVMType.(*types.IntType)
-			if srcIntType.BitSize < tgtIntType.BitSize {
-				cast = block.NewSExt(src, targetLLVMType)
-			} else if srcIntType.BitSize > tgtIntType.BitSize {
-				cast = block.NewTrunc(src, targetLLVMType)
-			} else {
-				cast = src
-			}
-		} else {
-			fmt.Printf("[WARNING] TypeCastInst: Performing potentially unsafe BitCast from %s to %s\n", src.Type().LLString(), targetLLVMType.LLString())
-			cast = block.NewBitCast(src, targetLLVMType)
-		}
-		cg.assignToVar(i.GetLHS()[0], cast, block)
-		return
-
-	case *bir.NewArrayInst:
-		var sizeVal int64
-		if i.SizeVar != nil {
-			sizeOperand := cg.getVarValue(i.SizeVar, block)
-			if constSize, ok := sizeOperand.(*constant.Int); ok {
-				sizeVal = constSize.X.Int64()
-			} else {
-				fmt.Printf("[WARNING] NewArrayInst: SizeVar %s is not a constant. Defaulting based on Args count if SizeVar is -1.\n", i.SizeVar.BIRName)
-				sizeVal = -1
-			}
-		} else {
-			sizeVal = int64(len(i.Args))
-		}
-
-		if sizeVal == -1 && len(i.Args) > 0 {
-			fmt.Printf("[DEBUG] NewArrayInst: SizeVar resulted in -1, but Args are present. Using len(Args)=%d as size.\n", len(i.Args))
-			sizeVal = int64(len(i.Args))
-		} else if sizeVal < 0 {
-			fmt.Printf("[ERROR] NewArrayInst: Invalid array size %d. Defaulting to 0 for safety.\n", sizeVal)
-			sizeVal = 0
-		}
-
-		llvmElementType := types.I8Ptr
-		array := cg.CreateArray(sizeVal, llvmElementType, block)
-
-		if len(i.Args) > 0 && sizeVal > 0 {
-			arrayStructType := cg.structTypes["BallerinaArray"]
-			arrayDataFieldPtr := block.NewGetElementPtr(arrayStructType, array,
-				constant.NewInt(types.I32, 0),
-				constant.NewInt(types.I32, 1))
-
-			arrayDataBuffer := block.NewLoad(types.I8Ptr, arrayDataFieldPtr)
-
-			for idx, argVar := range i.Args {
-				if int64(idx) >= sizeVal {
-					fmt.Printf("[ERROR] NewArrayInst: Attempting to write past allocated array bounds. Index: %d, Size: %d for arg %s\n", idx, sizeVal, argVar.BIRName)
-					break
-				}
-				elemValue := cg.getVarValue(argVar, block)
-				fmt.Printf("[DEBUG] NewArrayInst: Element value for arg %s at index %d is: %s of type %s\n",
-					argVar.BIRName, idx, elemValue.Ident(), elemValue.Type().LLString())
-
-				elemAsI8Ptr := block.NewBitCast(elemValue, types.I8Ptr)
-
-				ptrToElemSlot := block.NewGetElementPtr(llvmElementType, arrayDataBuffer, constant.NewInt(types.I64, int64(idx)))
-
-				fmt.Printf("[DEBUG] NewArrayInst: Storing %s (type %s) at index %d into slot %s (type %s)\n",
-					elemAsI8Ptr.Ident(), elemAsI8Ptr.Type().LLString(),
-					idx, ptrToElemSlot.Ident(), ptrToElemSlot.Type().LLString())
-
-				block.NewStore(elemAsI8Ptr, ptrToElemSlot)
-			}
-		}
-		cg.assignToVar(i.GetLHS()[0], array, block)
-		fmt.Printf("[DEBUG] NewArrayInst: Created array %s with %d slots, assigned to %s\n", array.Ident(), sizeVal, i.GetLHS()[0].BIRName)
-		return
-
-	case *bir.NewTypeInst:
-		fmt.Printf("[WARNING] NewTypeInst: Not fully implemented. Desc: %s\n", i.Desc)
-		if len(i.GetLHS()) > 0 && i.GetLHS()[0] != nil {
-			lhsVar := i.GetLHS()[0]
-			llvmType := cg.birTypeToLLVMType(lhsVar.Type)
-			var placeholder value.Value
-			if ptrType, ok := llvmType.(*types.PointerType); ok {
-				placeholder = constant.NewNull(ptrType)
-			} else {
-				placeholder = constant.NewZeroInitializer(llvmType)
-			}
-			cg.assignToVar(lhsVar, placeholder, block)
-		}
-		return
-
-	case *bir.NewMapInst:
-		fmt.Printf("[DEBUG] emitInstruction NewMapInst: LHS Var BIRName='%s', BIRType='%s'\n", i.GetLHS()[0].BIRName, i.GetLHS()[0].Type)
-		mapVal := cg.CreateMap(block)
-		cg.assignToVar(i.GetLHS()[0], mapVal, block)
-		return
-
-	default:
-		panic(fmt.Sprintf("unsupported BIR instruction: %T", inst))
-	}
-}
-
-// emitTerminator generates LLVM IR for a BIR terminator instruction.
-func (cg *CodeGenerator) emitTerminator(term bir.TerminatorInstruction, currentBlock *ir.Block, blockMap map[string]*ir.Block, birFunc *bir.Function) {
-	fmt.Printf("[DEBUG] emitTerminator: Processing terminator %T in block %s for function %s\n", term, currentBlock.LocalIdent.Ident(), birFunc.Name)
-
-	llvmFunc, ok := cg.functions[birFunc.Name] // Get the LLVM function from the map
-	if !ok || llvmFunc == nil {
-		panic(fmt.Sprintf("emitTerminator: LLVM function %s not found in cg.functions", birFunc.Name))
-	}
-
-	switch t := term.(type) {
-	case *bir.ReturnInst:
-		if llvmFunc.Sig.RetType.Equal(types.Void) {
-			currentBlock.NewRet(nil) // LLVM void return
-		} else {
-			// LLVM function returns a non-void type
-			if birFunc.ReturnVariable == nil || birFunc.ReturnVariable.BIRName == "" {
-				panic(fmt.Sprintf("emitTerminator: LLVM func %s returns %s but BIR func has no ReturnVariable", birFunc.Name, llvmFunc.Sig.RetType.LLString()))
-			}
-			retVal := cg.getVarValue(birFunc.ReturnVariable, currentBlock)
-			if !retVal.Type().Equal(llvmFunc.Sig.RetType) {
-				fmt.Printf("[WARNING] emitTerminator: ReturnInst for %s. LLVM RetType: %s, Actual retVal type: %s. Value: %s. Attempting bitcast.\n",
-					birFunc.Name, llvmFunc.Sig.RetType.LLString(), retVal.Type().LLString(), retVal.Ident())
-				// Attempt a bitcast if types are pointer-compatible or otherwise logically equivalent
-				if types.IsPointer(retVal.Type()) && types.IsPointer(llvmFunc.Sig.RetType) {
-					retVal = currentBlock.NewBitCast(retVal, llvmFunc.Sig.RetType)
-				} else {
-					panic(fmt.Sprintf("emitTerminator: ReturnInst: Cannot reconcile return type %s with expected %s for function %s", retVal.Type().LLString(), llvmFunc.Sig.RetType.LLString(), birFunc.Name))
-				}
-			}
-			currentBlock.NewRet(retVal)
-		}
-	case *bir.GotoInst:
-		targetBB, ok := blockMap[t.TargetBB]
-		if !ok {
-			panic(fmt.Sprintf("emitTerminator: target basic block %s not found for GOTO in function %s", t.TargetBB, birFunc.Name))
-		}
-		currentBlock.NewBr(targetBB)
-	case *bir.ConditionalBranchInst:
-		condVal := cg.getVarValue(t.Condition, currentBlock)
-		// Ensure condVal is i1. If not, it needs to be compared (e.g., != 0 for integers)
-		if !condVal.Type().Equal(types.I1) {
-			// Assuming boolean is represented as i8, compare with 0
-			if intType, ok := condVal.Type().(*types.IntType); ok && intType.BitSize > 1 {
-				condVal = currentBlock.NewICmp(enum.IPredNE, condVal, constant.NewInt(intType, 0))
-			} else {
-				// If it's not an integer type we can easily compare to zero, this might be an issue.
-				// For now, we'll proceed, but LLVM will error if condVal is not i1.
-				fmt.Printf("[WARNING] emitTerminator: ConditionalBranch condition in %s for func %s is type %s, expected i1. Attempting to use directly.\n", currentBlock.LocalIdent.Ident(), birFunc.Name, condVal.Type().LLString())
-			}
-		}
-		trueBB, okTrue := blockMap[t.TrueBB]
-		falseBB, okFalse := blockMap[t.FalseBB]
-		if !okTrue {
-			panic(fmt.Sprintf("emitTerminator: target basic block TrueBB %s not found for ConditionalBranch in function %s", t.TrueBB, birFunc.Name))
-		}
-		if !okFalse {
-			panic(fmt.Sprintf("emitTerminator: target basic block FalseBB %s not found for ConditionalBranch in function %s", t.FalseBB, birFunc.Name))
-		}
-		currentBlock.NewCondBr(condVal, trueBB, falseBB)
-	case *bir.CallInst: // If a CallInst can be a terminator
-		if t.IsTerminator() {
-			cg.emitActualCall(t, currentBlock) // Generate the actual call
-
-			// After the call, branch to the NextBB
-			// A CallInst terminator must define where control flows next.
-			if t.NextBB == "" {
-				// This is problematic for a CallInst that IS a terminator but doesn't specify NextBB
-				// unless it's a known 'noreturn' call (like panic).
-				// If it's the last call in a function, the block should still be terminated by a 'ret'.
-				// This situation suggests the BIR might be incomplete or this block needs a subsequent 'ret'.
-				// For now, we rely on the outer loop in `generateFunction` to add a default terminator if this block isn't properly closed.
-				fmt.Printf("[WARNING] emitTerminator: CallInst in %s for func %s is a terminator but has no NextBB. Block termination relies on subsequent logic or default terminator.\n", currentBlock.LocalIdent.Ident(), birFunc.Name)
-				// If the block is still not terminated (e.g. call was not noreturn),
-				// and this is the *only* terminator, it's an issue.
-				// However, if `currentBlock.Term` is still nil here, the default return in `generateFunction` will kick in.
-			} else {
-				targetBB, ok := blockMap[t.NextBB]
-				if !ok {
-					panic(fmt.Sprintf("emitTerminator: target basic block %s not found for CallInst terminator in function %s", t.NextBB, birFunc.Name))
-				}
-				// Check if the block isn't already terminated (e.g., by a noreturn call like panic from emitActualCall)
-				if currentBlock.Term == nil {
-					currentBlock.NewBr(targetBB)
-				}
-			}
-		} else {
-			// This means a CallInst was passed as a terminator, but its IsTerminator() is false.
-			// This is a BIR structural error.
-			panic(fmt.Sprintf("emitTerminator: CallInst in %s for func %s was processed as terminator but IsTerminator() is false. Block will likely be ill-formed.", currentBlock.LocalIdent.Ident(), birFunc.Name))
-		}
-	default:
-		// Ensure the block is terminated if we fall through here without a specific case
-		if currentBlock.Term == nil {
-			panic(fmt.Sprintf("emitTerminator: unhandled BIR terminator type %T in block %s for function %s, and block was not otherwise terminated.", term, currentBlock.LocalIdent.Ident(), birFunc.Name))
-		}
-	}
-}
-
-// getLLVMFunction retrieves the *ir.Func for a given BIR function name,
-// handling mapping for known runtime functions.
-func (cg *CodeGenerator) getLLVMFunction(birFuncName string) *ir.Func {
-	var llvmMappedName string
-
-	// Map BIR function names to C-style names used in runtime.c
-	switch birFuncName {
-	case "println", "ballerina.io.println":
-		llvmMappedName = "ballerina_io_println"
-	case "ballerina.lang.array.new":
-		llvmMappedName = "ballerina_lang_array_new"
-	case "ballerina.lang.string.concat":
-		llvmMappedName = "ballerina_lang_string_concat"
-	case "ballerina.lang.map.new":
-		llvmMappedName = "ballerina_lang_map_new"
-	case "ballerina_string_new_with_literal": // Already C-style
-		llvmMappedName = birFuncName
-	default:
-		llvmMappedName = birFuncName
-	}
-
-	fn, ok := cg.functions[llvmMappedName]
-	if !ok {
-		fn, ok = cg.functions[birFuncName] // Fallback to original name
-		if !ok {
-			panic(fmt.Sprintf("getLLVMFunction: LLVM function not found for BIR function '%s' (tried mapping to '%s')", birFuncName, llvmMappedName))
-		}
-	}
-	fmt.Printf("[DEBUG] getLLVMFunction: Mapped BIR func '%s' to LLVM func '%s' (Ident: %s)\n", birFuncName, llvmMappedName, fn.Ident())
-	return fn
-}
-
-// CreateGlobalString creates a global string constant
-func (cg *CodeGenerator) CreateGlobalString(s string) value.Value {
-	name := fmt.Sprintf(".str.%d", len(cg.module.Globals))
+// CreateGlobalString creates a global string constant and returns a pointer to it (i8*).
+func (cg *CodeGenerator) CreateGlobalString(s string, block *ir.Block) value.Value {
+	name := fmt.Sprintf(".str.g.%d", len(cg.module.Globals))
 	chars := []constant.Constant{}
 	for i := 0; i < len(s); i++ {
 		chars = append(chars, constant.NewInt(types.I8, int64(s[i])))
 	}
-	chars = append(chars, constant.NewInt(types.I8, 0))
-	arrayType := types.NewArray(uint64(len(s)+1), types.I8)
+	chars = append(chars, constant.NewInt(types.I8, 0)) // Null terminator
+	arrayType := types.NewArray(uint64(len(chars)), types.I8)
 	init := constant.NewArray(arrayType, chars...)
+
 	global := cg.module.NewGlobalDef(name, init)
+	global.Linkage = enum.LinkagePrivate
+	global.UnnamedAddr = enum.UnnamedAddrNone
+
+	// Get i8* pointer to the first element
 	zero := constant.NewInt(types.I32, 0)
-	indices := []constant.Constant{zero, zero}
-	return constant.NewGetElementPtr(arrayType, global, indices...)
+	ptr := constant.NewGetElementPtr(arrayType, global, zero, zero)
+	return ptr
 }
 
-// assignToVar assigns a value to a variable in the LLVM IR
-func (cg *CodeGenerator) assignToVar(v *bir.Variable, val value.Value, block *ir.Block) {
-	fmt.Printf("[DEBUG] assignToVar: START for variable Name='%s', BIRName='%s', BIRType='%s', Kind='%s'\n", v.Name, v.BIRName, v.Type, v.Kind)
+// CreateString creates a BallerinaString struct from a Go string literal.
+func (cg *CodeGenerator) CreateString(s string, block *ir.Block) value.Value {
+	createStrFunc := cg.getLLVMFunction("ballerina_string_new_with_literal")
+	if createStrFunc == nil {
+		panic("Runtime function ballerina_string_new_with_literal not found.")
+	}
 
-	// Check if it's a global variable
-	if globDef, isGlobal := cg.globals[v.BIRName]; isGlobal {
-		fmt.Printf("[DEBUG] assignToVar: Assigning to GLOBAL variable '%s'. GlobalDef Type: %s, Value to store Type: %s\n",
-			v.BIRName, globDef.Typ.LLString(), val.Type().LLString())
+	globalCStr := cg.CreateGlobalString(s, block)
+	lengthVal := constant.NewInt(types.I64, int64(len(s)))
+	balStringPtr := block.NewCall(createStrFunc, globalCStr, lengthVal)
 
-		if !val.Type().Equal(globDef.Typ) {
-			errorMsg := fmt.Sprintf("assignToVar: PANICKING! Type mismatch for GLOBAL. Cannot store value of LLVM type '%s' into global variable '%s' which has LLVM type '%s'.",
-				val.Type().LLString(), v.BIRName, globDef.Typ.LLString())
-			fmt.Printf("[DEBUG] %s\n", errorMsg)
-			panic(errorMsg)
+	safeName := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			return r
 		}
-
-		block.NewStore(val, globDef)
-		fmt.Printf("[DEBUG] assignToVar: END for global variable '%s'\n", v.BIRName)
-		return
+		return '_'
+	}, s)
+	if len(safeName) > 20 {
+		safeName = safeName[:20]
 	}
-
-	// If not global, assume it's a local variable (alloca)
-	alloca, ok := cg.varMap[v.BIRName]
-	if !ok {
-		panicMsg := fmt.Sprintf("assignToVar: missing alloca for local variable %s (BIRName: %s)", v.Name, v.BIRName)
-		fmt.Printf("[DEBUG] assignToVar: %s\n", panicMsg)
-		panic(panicMsg)
-	}
-
-	fmt.Printf("[DEBUG] assignToVar: Alloca for '%s' is: %s\n", v.BIRName, alloca.String())
-	fmt.Printf("[DEBUG] assignToVar: Alloca's LLVM type for '%s' is: %s\n", v.BIRName, alloca.Type().LLString())
-
-	allocaElemType := alloca.Type().(*types.PointerType).ElemType
-	fmt.Printf("[DEBUG] assignToVar: Alloca Elem Type (variable's expected LLVM type) for '%s' (BIRType: '%s') is: %s\n", v.BIRName, v.Type, allocaElemType.LLString())
-
-	valType := val.Type()
-	fmt.Printf("[DEBUG] assignToVar: Value to store is: %s\n", val.String())
-	fmt.Printf("[DEBUG] assignToVar: Value's LLVM type is: %s\n", valType.LLString())
-
-	if !valType.Equal(allocaElemType) {
-		errorMsg := fmt.Sprintf("assignToVar: PANICKING! Type mismatch for LOCAL. Cannot store value of LLVM type '%s' into variable '%s' (BIR type: '%s') which has LLVM type '%s'. Value: '%s', Alloca: '%s'",
-			valType.LLString(), v.BIRName, v.Type, allocaElemType.LLString(), val.String(), alloca.String())
-		fmt.Printf("[DEBUG] %s\n", errorMsg)
-		panic(errorMsg)
-	}
-
-	fmt.Printf("[DEBUG] assignToVar: Types match for LOCAL. Storing value into alloca for '%s'.\n", v.BIRName)
-	block.NewStore(val, alloca)
-	fmt.Printf("[DEBUG] assignToVar: END for local variable '%s'\n", v.BIRName)
+	balStringPtr.SetName("balstr_" + safeName)
+	return balStringPtr
 }
 
-// getSizeOfType returns the size of a type in bytes
-func (cg *CodeGenerator) getSizeOfType(t types.Type) int64 {
-	switch t := t.(type) {
-	case *types.IntType:
-		return int64(t.BitSize) / 8
-	case *types.FloatType:
-		if t == types.Float {
-			return 4
-		}
-		return 8 // double
-	case *types.StructType:
-		// Rough estimate, this should be improved for proper struct layout
-		var size int64
-		for _, field := range t.Fields {
-			size += cg.getSizeOfType(field)
-		}
-		return size
-	case *types.ArrayType:
-		return int64(t.Len) * cg.getSizeOfType(t.ElemType)
-	case *types.PointerType:
-		return 8 // Pointer size, typically 8 bytes on 64-bit systems
-	default:
-		return 8 // Default to 8 bytes
-	}
-}
-
-// getVarValue retrieves a value from a variable in the LLVM IR
-func (cg *CodeGenerator) getVarValue(v *bir.Variable, block *ir.Block) value.Value {
-	fmt.Printf("[DEBUG] getVarValue: START for variable Name='%s', BIRName='%s', BIRType='%s', Kind='%s'\n", v.Name, v.BIRName, v.Type, v.Kind)
-
-	llvmVal, ok := cg.varMap[v.BIRName]
-	if !ok {
-		if globDef, isGlobal := cg.globals[v.BIRName]; isGlobal {
-			loadedGlobal := block.NewLoad(globDef.Typ, globDef)
-			fmt.Printf("[DEBUG] getVarValue: Variable '%s' is GLOBAL. Loading from global. Global: %s, Loaded: %s, LLVMType: %s\n",
-				v.BIRName, globDef.Ident(), loadedGlobal.Ident(), loadedGlobal.Type().LLString())
-			return loadedGlobal
-		}
-		panic(fmt.Sprintf("getVarValue: LLVM value not found in varMap or globals for BIR variable '%s' (Name: '%s')", v.BIRName, v.Name))
-	}
-
-	if anAlloca, isAlloca := llvmVal.(*ir.InstAlloca); isAlloca {
-		elemType := anAlloca.ElemType
-		loadedVal := block.NewLoad(elemType, anAlloca)
-		fmt.Printf("[DEBUG] getVarValue: Variable '%s' is LOCAL (alloca). Loading from alloca. Alloca: %s, Loaded: %s, LLVMType: %s\n",
-			v.BIRName, anAlloca.Ident(), loadedVal.Ident(), loadedVal.Type().LLString())
-		return loadedVal
-	}
-
-	fmt.Printf("[DEBUG] getVarValue: Variable '%s' is PARAMETER or other direct value. Using directly. Value: %s, LLVMType: %s\n",
-		v.BIRName, llvmVal.Ident(), llvmVal.Type().LLString())
-	return llvmVal
-}
-
-// emitConstant generates LLVM IR for a constant
-func (cg *CodeGenerator) emitConstant(inst *bir.ConstantLoadInst) value.Value {
-	typ := cg.birTypeToLLVMType(inst.TypeName)
-	switch v := inst.Value.(type) {
-	case int:
-		return constant.NewInt(typ.(*types.IntType), int64(v))
-	case int64:
-		return constant.NewInt(typ.(*types.IntType), v)
-	case float64:
-		return constant.NewFloat(typ.(*types.FloatType), v)
-	case string:
-		if v == "nil" {
-			if ptrType, ok := typ.(*types.PointerType); ok {
-				return constant.NewNull(ptrType)
-			}
-			panic(fmt.Sprintf("emitConstant: 'nil' assignment to non-pointer LLVM type %s for BIR type %s", typ.LLString(), inst.TypeName))
-		}
-		panic(fmt.Sprintf("emitConstant for non-nil string literals ('%s') is not supported as it requires a runtime call. Use ConstantLoadInst in emitInstruction.", v))
-	case bool:
-		if v {
-			return constant.NewInt(typ.(*types.IntType), 1)
-		}
-		return constant.NewInt(typ.(*types.IntType), 0)
-	default:
-		panic(fmt.Sprintf("unsupported constant type in emitConstant: %T", v))
-	}
-}
-
-// getOrCreateMemcpyIntrinsic ensures the memcpy intrinsic is defined in the module
-func (cg *CodeGenerator) getOrCreateMemcpyIntrinsic() *ir.Func {
-	memcpyName := "llvm.memcpy.p0i8.p0i8.i64"
-	if memcpyFunc, ok := cg.functions[memcpyName]; ok {
-		return memcpyFunc
-	}
-
-	memcpyFunc := cg.module.NewFunc(
-		memcpyName,
-		types.Void,
-		ir.NewParam("dest", types.I8Ptr),
-		ir.NewParam("src", types.I8Ptr),
-		ir.NewParam("size", types.I64),
-		ir.NewParam("isvolatile", types.I1),
-		ir.NewParam("align", types.I32),
-	)
-	cg.functions[memcpyName] = memcpyFunc
-
-	return memcpyFunc
-}
-
-// birTypeToLLVMType converts a BIR type to an LLVM type
+// birTypeToLLVMType converts a BIR type string to an LLVM type.
 func (cg *CodeGenerator) birTypeToLLVMType(birType string) types.Type {
-	fmt.Printf("[DEBUG] birTypeToLLVMType: Called with birType='%s'\n", birType)
-
-	if strings.HasPrefix(birType, "map<") {
-		if _, ok := cg.structTypes["BallerinaMap"]; !ok {
-			cg.structTypes["BallerinaMap"] = types.NewStruct(
-				types.I64,
-				types.I64,
-				types.I8Ptr,
-			)
-		}
-
-		mapType := cg.structTypes["BallerinaMap"]
-		fmt.Printf("[DEBUG] birTypeToLLVMType: birType='%s' (map) using BallerinaMap. Returning LLVM type: %s\n",
-			birType, types.NewPointer(mapType).LLString())
-		return types.NewPointer(mapType)
-	}
-
-	if strings.HasSuffix(birType, "[]") || strings.Contains(birType, "<>[]") {
-		if _, ok := cg.structTypes["BallerinaArray"]; !ok {
-			cg.structTypes["BallerinaArray"] = types.NewStruct(
-				types.I64,
-				types.I8Ptr,
-			)
-		}
-
-		arrayType := cg.structTypes["BallerinaArray"]
-		fmt.Printf("[DEBUG] birTypeToLLVMType: birType='%s' (array) using BallerinaArray. Returning LLVM type: %s\n",
-			birType, types.NewPointer(arrayType).LLString())
-		return types.NewPointer(arrayType)
-	}
-
-	if st, ok := cg.structTypes[birType]; ok {
-		return types.NewPointer(st)
-	}
-
-	var retType types.Type
+	fmt.Printf("[DEBUG] birTypeToLLVMType: Converting BIR type '%s'\n", birType)
 	switch birType {
 	case "int":
-		retType = types.I64
-	case "boolean":
-		retType = types.I1
-	case "float":
-		retType = types.Double
+		return types.I64
 	case "string":
-		if ballerinaStringType, ok := cg.structTypes["BallerinaString"]; ok {
-			retType = types.NewPointer(ballerinaStringType)
-		} else {
-			ballerinaStringType = types.NewStruct(
-				types.I64,
-				types.I8Ptr,
-			)
-			cg.structTypes["BallerinaString"] = ballerinaStringType
-			retType = types.NewPointer(ballerinaStringType)
+		// Always return BallerinaString* for string types
+		if t, ok := cg.structTypes["BallerinaString"]; ok {
+			return types.NewPointer(t)
 		}
+		// Fallback if BallerinaString not defined yet - but this should not happen
+		// if AddRuntimeTypes is called properly
+		fmt.Printf("[WARNING] birTypeToLLVMType: BallerinaString not defined, falling back to i8*\n")
+		return types.I8Ptr
+	case "boolean":
+		return types.I1
 	case "()":
-		retType = types.NewPointer(types.I64)
+		return types.Void
+	case "map":
+		if t, ok := cg.structTypes["BallerinaMap"]; ok {
+			return types.NewPointer(t)
+		}
+		// Fallback if BallerinaMap not defined yet
+		return types.I8Ptr
 	default:
-		if strings.Contains(birType, ":") {
-			if strings.Contains(birType, "Printable") {
-				if ballerinaStringType, ok := cg.structTypes["BallerinaString"]; ok {
-					retType = types.NewPointer(ballerinaStringType)
+		// Handle complex types
+		if strings.Contains(birType, "map<") {
+			// Handle map types like "map<any>"
+			if t, ok := cg.structTypes["BallerinaMap"]; ok {
+				return types.NewPointer(t)
+			}
+			// Fallback if BallerinaMap not defined yet
+			return types.I8Ptr
+		}
+		if strings.Contains(birType, "ballerina/io") && strings.Contains(birType, "Printable") {
+			// Handle Printable type - this should be BallerinaString* for string values
+			if t, ok := cg.structTypes["BallerinaString"]; ok {
+				return types.NewPointer(t)
+			}
+			return types.I8Ptr
+		}
+		if strings.Contains(birType, "typeRefDesc") {
+			// Handle type descriptors - these are usually arrays for println
+			// For now, treat them as BallerinaArray* which contains the string elements
+			if t, ok := cg.structTypes["BallerinaArray"]; ok {
+				return types.NewPointer(t)
+			}
+			return types.I8Ptr
+		}
+
+		if t, ok := cg.structTypes[birType]; ok {
+			return types.NewPointer(t)
+		}
+		fmt.Printf("[WARNING] birTypeToLLVMType: Unhandled BIR type '%s', returning void*\n", birType)
+		return types.I8Ptr
+	}
+}
+
+// generateFunction generates LLVM IR for a single BIR function.
+func (cg *CodeGenerator) generateFunction(fn *bir.Function) *ir.Func {
+	fmt.Printf("[DEBUG] generateFunction: Starting generation for BIR function '%s'\n", fn.Name)
+
+	// Ensure runtime types are available before processing
+	if _, ok := cg.structTypes["BallerinaString"]; !ok {
+		cg.AddRuntimeTypes()
+	}
+
+	// 1. Determine LLVM function signature
+	var llvmParamTypes []types.Type
+	for _, birParam := range fn.Parameters {
+		llvmParamTypes = append(llvmParamTypes, cg.birTypeToLLVMType(birParam.Type))
+	}
+	var returnType types.Type
+	if fn.ReturnVariable != nil && fn.ReturnVariable.Type != "()" {
+		returnType = cg.birTypeToLLVMType(fn.ReturnVariable.Type)
+	} else {
+		returnType = types.Void
+	}
+
+	// Create ir.Param instances for NewFunc
+	var llvmParams []*ir.Param
+	for i, pt := range llvmParamTypes {
+		paramName := ""
+		if i < len(fn.Parameters) {
+			paramName = fn.Parameters[i].OriginalName
+		}
+		llvmParams = append(llvmParams, ir.NewParam(paramName, pt))
+	}
+
+	llvmFunc := cg.module.NewFunc(fn.Name, returnType, llvmParams...)
+	cg.functions[fn.Name] = llvmFunc
+
+	// Clear and repopulate varMap for this function's scope
+	cg.varMap = make(map[string]value.Value)
+
+	// 2. Create entry basic block
+	entryBB := llvmFunc.NewBlock("entry")
+
+	// 3. Allocate space for parameters and local variables
+	for i, birParam := range fn.Parameters {
+		llvmParam := llvmFunc.Params[i]
+		llvmParam.SetName(birParam.OriginalName)
+
+		allocaInst := entryBB.NewAlloca(llvmParam.Type())
+		allocaInst.SetName(birParam.BIRName + ".addr")
+		entryBB.NewStore(llvmParam, allocaInst)
+		cg.varMap[birParam.BIRName] = allocaInst
+	}
+
+	// Return variable (if not void) - IMPORTANT: Create %0 variable for return value
+	if fn.ReturnVariable != nil && !returnType.Equal(types.Void) {
+		allocaInst := entryBB.NewAlloca(returnType)
+		allocaInst.SetName(fn.ReturnVariable.BIRName + ".addr")
+		cg.varMap[fn.ReturnVariable.BIRName] = allocaInst
+		// Also map by %0 convention
+		cg.varMap["%0"] = allocaInst
+	}
+
+	// Local Variables - be more careful about type handling
+	for _, birVar := range fn.LocalVars {
+		if _, isMapped := cg.varMap[birVar.BIRName]; isMapped {
+			continue
+		}
+		llvmVarType := cg.birTypeToLLVMType(birVar.Type)
+		if llvmVarType.Equal(types.Void) {
+			continue
+		}
+
+		// For string variables, ensure we use BallerinaString* not i8*
+		if birVar.Type == "string" {
+			if ballerinaStringType, ok := cg.structTypes["BallerinaString"]; ok {
+				llvmVarType = types.NewPointer(ballerinaStringType)
+			}
+		}
+
+		allocaInst := entryBB.NewAlloca(llvmVarType)
+		allocaInst.SetName(birVar.BIRName + ".local.addr")
+		cg.varMap[birVar.BIRName] = allocaInst
+	}
+
+	// 4. Map BIR basic blocks to LLVM basic blocks
+	bbMap := make(map[string]*ir.Block)
+	for i, birBB := range fn.BasicBlocks {
+		var llvmBB *ir.Block
+		if i == 0 {
+			llvmBB = entryBB
+			llvmBB.SetName(birBB.ID)
+		} else {
+			llvmBB = llvmFunc.NewBlock(birBB.ID)
+		}
+		bbMap[birBB.ID] = llvmBB
+	}
+
+	// 5. Populate LLVM basic blocks with instructions
+	for _, birBB := range fn.BasicBlocks {
+		llvmBB := bbMap[birBB.ID]
+		fmt.Printf("[DEBUG] generateFunction: Processing BIR BB '%s' for LLVM BB '%s'\n", birBB.ID, llvmBB.Ident())
+
+		// Process BIR instructions
+		for _, birInst := range birBB.Instructions {
+			cg.emitInstruction(birInst, llvmBB, bbMap)
+		}
+
+		// Process terminator
+		if birBB.Terminator != nil {
+			cg.emitTerminator(birBB.Terminator, llvmBB, bbMap)
+		} else {
+			// Add default terminator
+			if iAmTheLastBlockAndHaveNoTerminator(birBB, fn, llvmBB, llvmFunc) {
+				if returnType.Equal(types.Void) {
+					llvmBB.NewRet(nil)
 				} else {
-					ballerinaStringType = types.NewStruct(
-						types.I64,
-						types.I8Ptr,
-					)
-					cg.structTypes["BallerinaString"] = ballerinaStringType
-					retType = types.NewPointer(ballerinaStringType)
+					if retVarAlloca, ok := cg.varMap[fn.ReturnVariable.BIRName]; ok {
+						loadedVal := llvmBB.NewLoad(returnType, retVarAlloca)
+						llvmBB.NewRet(loadedVal)
+					} else {
+						llvmBB.NewRet(constant.NewZeroInitializer(returnType))
+					}
 				}
 			} else {
-				fmt.Printf("[DEBUG] birTypeToLLVMType: birType='%s' (FQN %s). Returning LLVM type: %s\n",
-					birType, birType[strings.LastIndex(birType, ":")+1:], types.I8Ptr.LLString())
-				retType = types.I8Ptr
+				llvmBB.NewUnreachable()
+				fmt.Printf("[WARNING] generateFunction: Block '%s' has no terminator, added unreachable\n", birBB.ID)
 			}
-		} else {
-			fmt.Printf("[WARNING] birTypeToLLVMType: Unknown type '%s', defaulting to i8*\n", birType)
-			retType = types.I8Ptr
 		}
 	}
 
-	fmt.Printf("[DEBUG] birTypeToLLVMType: birType='%s' (switch case). Returning LLVM type: %s\n", birType, retType.LLString())
-	return retType
+	fmt.Printf("[DEBUG] generateFunction: Finished generation for LLVM function '%s'\n", llvmFunc.Ident())
+	return llvmFunc
 }
 
-// AddRuntimeFunctions is defined in runtime.go
+// iAmTheLastBlockAndHaveNoTerminator is a helper function
+func iAmTheLastBlockAndHaveNoTerminator(birBB *bir.BasicBlock, fn *bir.Function, llvmBB *ir.Block, llvmFunc *ir.Func) bool {
+	if birBB.ID == fn.BasicBlocks[len(fn.BasicBlocks)-1].ID && birBB.Terminator == nil {
+		return true
+	}
+	return false
+}
+
+// emitInstruction converts BIR instructions to LLVM IR
+func (cg *CodeGenerator) emitInstruction(birInst bir.Instruction, llvmBB *ir.Block, bbMap map[string]*ir.Block) {
+	fmt.Printf("[DEBUG] emitInstruction: Processing instruction type: %T\n", birInst)
+
+	switch inst := birInst.(type) {
+	case *bir.ConstantLoadInst:
+		var llvmVal value.Value
+		switch inst.TypeName {
+		case "string":
+			if strVal, ok := inst.Value.(string); ok {
+				llvmVal = cg.CreateString(strVal, llvmBB)
+			}
+		case "int":
+			if intVal, ok := inst.Value.(int64); ok {
+				llvmVal = constant.NewInt(types.I64, intVal)
+			}
+		case "boolean":
+			if boolVal, ok := inst.Value.(bool); ok {
+				if boolVal {
+					llvmVal = constant.NewInt(types.I1, 1)
+				} else {
+					llvmVal = constant.NewInt(types.I1, 0)
+				}
+			}
+		case "()":
+			// For void constants, don't assign to a variable
+			// Just return without creating any instruction
+			return
+		default:
+			fmt.Printf("[WARNING] emitInstruction: Unhandled constant type: %s\n", inst.TypeName)
+			llvmVal = constant.NewUndef(cg.birTypeToLLVMType(inst.TypeName))
+		}
+
+		if len(inst.GetLHS()) > 0 && llvmVal != nil {
+			cg.assignToVar(inst.GetLHS()[0], llvmVal, llvmBB)
+		}
+
+	case *bir.MoveInst:
+		sourceVal := cg.loadVar(inst.RHS, llvmBB)
+		cg.assignToVar(inst.GetLHS()[0], sourceVal, llvmBB)
+
+	case *bir.BinaryOpInst:
+		leftVal := cg.loadVar(inst.Op1, llvmBB)
+		rightVal := cg.loadVar(inst.Op2, llvmBB)
+
+		var resultVal value.Value
+		switch inst.Op {
+		case "+":
+			resultVal = llvmBB.NewAdd(leftVal, rightVal)
+		case "-":
+			resultVal = llvmBB.NewSub(leftVal, rightVal)
+		case "*":
+			resultVal = llvmBB.NewMul(leftVal, rightVal)
+		case "/":
+			resultVal = llvmBB.NewSDiv(leftVal, rightVal)
+		case "==":
+			resultVal = llvmBB.NewICmp(enum.IPredEQ, leftVal, rightVal)
+		case "!=":
+			resultVal = llvmBB.NewICmp(enum.IPredNE, leftVal, rightVal)
+		case "<":
+			resultVal = llvmBB.NewICmp(enum.IPredSLT, leftVal, rightVal)
+		case "<=":
+			resultVal = llvmBB.NewICmp(enum.IPredSLE, leftVal, rightVal)
+		case ">":
+			resultVal = llvmBB.NewICmp(enum.IPredSGT, leftVal, rightVal)
+		case ">=":
+			resultVal = llvmBB.NewICmp(enum.IPredSGE, leftVal, rightVal)
+		default:
+			fmt.Printf("[WARNING] emitInstruction: Unhandled binary op: %s\n", inst.Op)
+			resultVal = constant.NewUndef(cg.birTypeToLLVMType("int"))
+		}
+		cg.assignToVar(inst.GetLHS()[0], resultVal, llvmBB)
+
+	case *bir.TypeCastInst:
+		// Handle type casting - be more careful about type compatibility
+		sourceVal := cg.loadVar(inst.SourceVar, llvmBB)
+		targetType := cg.birTypeToLLVMType(inst.TargetType)
+
+		fmt.Printf("[DEBUG] TypeCastInst: Source type=%s, Target type string='%s', Target LLVM type=%s\n",
+			sourceVal.Type(), inst.TargetType, targetType)
+
+		var castedVal value.Value
+		if sourceVal.Type().Equal(targetType) {
+			castedVal = sourceVal
+		} else {
+			// Check if this is a boolean source
+			if sourceVal.Type().Equal(types.I1) {
+				fmt.Printf("[DEBUG] TypeCastInst: Boolean source type i1, target type='%s'\n", inst.TargetType)
+			}
+
+			// Special case: boolean to string conversion
+			if sourceVal.Type().Equal(types.I1) && strings.Contains(inst.TargetType, "Printable") {
+				fmt.Printf("[DEBUG] TypeCastInst: Converting boolean to Printable, target type='%s'\n", inst.TargetType)
+				// Convert boolean to string using runtime function
+				boolToStringFunc := cg.getLLVMFunction("ballerina_runtime_bool_to_string")
+				if boolToStringFunc != nil {
+					castedVal = llvmBB.NewCall(boolToStringFunc, sourceVal)
+					fmt.Printf("[DEBUG] TypeCastInst: Converted boolean to string using runtime function\n")
+				} else {
+					fmt.Printf("[ERROR] TypeCastInst: ballerina_runtime_bool_to_string function not found!\n")
+					castedVal = constant.NewUndef(targetType)
+				}
+			} else if _, isSourcePtr := sourceVal.Type().(*types.PointerType); isSourcePtr {
+				// Only cast between compatible pointer types
+				if _, isTargetPtr := targetType.(*types.PointerType); isTargetPtr {
+					castedVal = llvmBB.NewBitCast(sourceVal, targetType)
+				} else if targetType.Equal(types.I8Ptr) {
+					castedVal = llvmBB.NewBitCast(sourceVal, targetType)
+				} else {
+					fmt.Printf("[WARNING] emitInstruction: Cannot cast pointer to non-pointer type in TypeCastInst\n")
+					castedVal = constant.NewUndef(targetType)
+				}
+			} else if sourceVal.Type().Equal(types.I8Ptr) {
+				if _, isTargetPtr := targetType.(*types.PointerType); isTargetPtr {
+					castedVal = llvmBB.NewBitCast(sourceVal, targetType)
+				} else {
+					fmt.Printf("[WARNING] emitInstruction: Cannot cast i8* to non-pointer type in TypeCastInst\n")
+					castedVal = constant.NewUndef(targetType)
+				}
+			} else {
+				fmt.Printf("[WARNING] emitInstruction: Cannot cast between incompatible types in TypeCastInst: %s to %s\n",
+					sourceVal.Type(), targetType)
+				castedVal = constant.NewUndef(targetType)
+			}
+		}
+		cg.assignToVar(inst.GetLHS()[0], castedVal, llvmBB)
+
+	case *bir.NewArrayInst:
+		// Handle array creation
+		arrayType := cg.birTypeToLLVMType(inst.ElementType)
+		var arraySize value.Value
+
+		fmt.Printf("[DEBUG] NewArrayInst: SizeVar=%v, Args count=%d\n", inst.SizeVar, len(inst.Args))
+		if inst.SizeVar != nil {
+			sizeVal := cg.loadVar(inst.SizeVar, llvmBB)
+			fmt.Printf("[DEBUG] NewArrayInst: SizeVar value=%v\n", sizeVal)
+		}
+
+		// If we have arguments, use the argument count as the size
+		// This handles the case where SizeVar contains -1 (unknown size at BIR generation time)
+		if len(inst.Args) > 0 {
+			arraySize = constant.NewInt(types.I64, int64(len(inst.Args)))
+			fmt.Printf("[DEBUG] NewArrayInst: Using args count as size: %d (constant)\n", len(inst.Args))
+		} else if inst.SizeVar != nil {
+			arraySize = cg.loadVar(inst.SizeVar, llvmBB)
+			fmt.Printf("[DEBUG] NewArrayInst: Using SizeVar value: %v\n", arraySize)
+		} else {
+			arraySize = constant.NewInt(types.I64, 0) // Empty array
+			fmt.Printf("[DEBUG] NewArrayInst: Using size 0\n")
+		}
+
+		// Create array using runtime function
+		elementSizeVal := constant.NewInt(types.I64, cg.getSizeOfType(arrayType))
+		arrayFunc := cg.getLLVMFunction("ballerina_lang_array_new")
+		if arrayFunc != nil {
+			arrayVal := llvmBB.NewCall(arrayFunc, arraySize, elementSizeVal)
+
+			// Populate the array with the provided arguments
+			for i, arg := range inst.Args {
+				argVal := cg.loadVar(arg, llvmBB)
+				indexVal := constant.NewInt(types.I64, int64(i))
+
+				// Call runtime function to set array element
+				setFunc := cg.getLLVMFunction("ballerina_lang_array_set")
+				if setFunc != nil {
+					llvmBB.NewCall(setFunc, arrayVal, indexVal, argVal)
+				}
+			}
+
+			cg.assignToVar(inst.GetLHS()[0], arrayVal, llvmBB)
+		}
+
+	case *bir.CallInst:
+		var args []value.Value
+		for _, arg := range inst.Args {
+			args = append(args, cg.loadVar(arg, llvmBB))
+		}
+
+		funcName := inst.FunctionName
+		if inst.PackagePath != "" {
+			funcName = inst.PackagePath + ":" + inst.FunctionName
+		}
+
+		// Special handling for println (both fully qualified and simple names)
+		if (funcName == "ballerina/io:println" || funcName == "println") && len(args) > 0 {
+			arg := args[0]
+			ballerinaStringPtrType := types.NewPointer(cg.structTypes["BallerinaString"])
+			ballerinaArrayPtrType := types.NewPointer(cg.structTypes["BallerinaArray"])
+
+			// Check if the argument is a BallerinaArray* (which is the case for println arrays)
+			if arg.Type().Equal(ballerinaArrayPtrType) {
+				// Use the array-specific println function
+				printlnArrayFunc := cg.getLLVMFunction("ballerina_io_println_array")
+				if printlnArrayFunc != nil {
+					llvmBB.NewCall(printlnArrayFunc, arg)
+					fmt.Printf("[DEBUG] emitInstruction: Generated println_array call with arg type %s\n", arg.Type())
+				} else {
+					fmt.Printf("[ERROR] emitInstruction: ballerina_io_println_array function not found!\n")
+				}
+			} else {
+				// Use the regular string println function
+				printlnFunc := cg.getLLVMFunction("ballerina_io_println")
+				if printlnFunc != nil {
+					if arg.Type().Equal(ballerinaStringPtrType) {
+						// Direct BallerinaString* - use as-is
+						llvmBB.NewCall(printlnFunc, arg)
+					} else {
+						// Cast other types to BallerinaString*
+						castedArg := llvmBB.NewBitCast(arg, ballerinaStringPtrType)
+						llvmBB.NewCall(printlnFunc, castedArg)
+					}
+					fmt.Printf("[DEBUG] emitInstruction: Generated println call with arg type %s\n", arg.Type())
+				} else {
+					fmt.Printf("[ERROR] emitInstruction: ballerina_io_println function not found!\n")
+				}
+			}
+		} else {
+			llvmFunc := cg.getLLVMFunction(funcName)
+			if llvmFunc == nil {
+				llvmFunc = cg.getLLVMFunction(inst.FunctionName)
+			}
+			if llvmFunc != nil {
+				result := llvmBB.NewCall(llvmFunc, args...)
+				if len(inst.GetLHS()) > 0 {
+					cg.assignToVar(inst.GetLHS()[0], result, llvmBB)
+				}
+			} else {
+				fmt.Printf("[WARNING] emitInstruction: Function '%s' not found\n", funcName)
+			}
+		}
+
+	default:
+		fmt.Printf("[WARNING] emitInstruction: Unhandled instruction type: %T\n", birInst)
+	}
+}
+
+// emitTerminator converts BIR terminators to LLVM IR
+func (cg *CodeGenerator) emitTerminator(birTerm bir.TerminatorInstruction, llvmBB *ir.Block, bbMap map[string]*ir.Block) {
+	switch term := birTerm.(type) {
+	case *bir.ReturnInst:
+		// Check the function's return type and return accordingly
+		var parentFunc *ir.Func
+		for _, f := range cg.module.Funcs {
+			for _, bb := range f.Blocks {
+				if bb == llvmBB {
+					parentFunc = f
+					break
+				}
+			}
+			if parentFunc != nil {
+				break
+			}
+		}
+
+		if parentFunc != nil && !parentFunc.Sig.RetType.Equal(types.Void) {
+			// Function expects a return value - load from return variable
+			retVarName := "%0" // Convention: %0 is usually the return variable
+			if retVar, ok := cg.varMap[retVarName]; ok {
+				retVal := llvmBB.NewLoad(parentFunc.Sig.RetType, retVar)
+				llvmBB.NewRet(retVal)
+			} else {
+				// Return a default value
+				llvmBB.NewRet(constant.NewZeroInitializer(parentFunc.Sig.RetType))
+			}
+		} else {
+			llvmBB.NewRet(nil)
+		}
+
+	case *bir.GotoInst:
+		if targetBB, ok := bbMap[term.TargetBB]; ok {
+			llvmBB.NewBr(targetBB)
+		} else {
+			fmt.Printf("[ERROR] emitTerminator: Target block '%s' not found\n", term.TargetBB)
+			llvmBB.NewUnreachable()
+		}
+
+	case *bir.ConditionalBranchInst:
+		conditionVal := cg.loadVar(term.Condition, llvmBB)
+		trueBB, okTrue := bbMap[term.TrueBB]
+		falseBB, okFalse := bbMap[term.FalseBB]
+
+		if okTrue && okFalse {
+			llvmBB.NewCondBr(conditionVal, trueBB, falseBB)
+		} else {
+			fmt.Printf("[ERROR] emitTerminator: Branch target blocks not found: %s, %s\n", term.TrueBB, term.FalseBB)
+			llvmBB.NewUnreachable()
+		}
+
+	case *bir.CallInst:
+		cg.emitInstruction(term, llvmBB, bbMap)
+		if nextBB, ok := bbMap[term.NextBB]; ok {
+			llvmBB.NewBr(nextBB)
+		} else {
+			fmt.Printf("[ERROR] emitTerminator: Next block '%s' not found for call\n", term.NextBB)
+			llvmBB.NewUnreachable()
+		}
+
+	default:
+		fmt.Printf("[WARNING] emitTerminator: Unhandled terminator type: %T\n", birTerm)
+		llvmBB.NewUnreachable()
+	}
+}
+
+// Helper methods for variable handling
+func (cg *CodeGenerator) assignToVar(birVar *bir.Variable, llvmVal value.Value, llvmBB *ir.Block) {
+	if alloca, ok := cg.varMap[birVar.BIRName]; ok {
+		// Check if the types are compatible
+		allocaType := alloca.Type().(*types.PointerType).ElemType
+		valType := llvmVal.Type()
+
+		fmt.Printf("[DEBUG] assignToVar: Assigning to variable '%s', alloca type: %s, value type: %s\n",
+			birVar.BIRName, allocaType, valType)
+
+		// If types match exactly, store directly
+		if allocaType.Equal(valType) {
+			llvmBB.NewStore(llvmVal, alloca)
+			fmt.Printf("[DEBUG] assignToVar: Direct store for variable '%s'\n", birVar.BIRName)
+			return
+		}
+
+		// Handle BallerinaString* assignments specially
+		ballerinaStringPtrType := types.NewPointer(cg.structTypes["BallerinaString"])
+
+		// If we're trying to store a BallerinaString* into a variable
+		if valType.Equal(ballerinaStringPtrType) {
+			if allocaType.Equal(ballerinaStringPtrType) {
+				// Direct store - both are BallerinaString*
+				llvmBB.NewStore(llvmVal, alloca)
+				fmt.Printf("[DEBUG] assignToVar: Direct BallerinaString* store for variable '%s'\n", birVar.BIRName)
+				return
+			} else if allocaType.Equal(types.I8Ptr) {
+				// NEVER cast BallerinaString* to i8* - this loses the structure
+				// Instead, we need to ensure the alloca is created as BallerinaString*
+				fmt.Printf("[ERROR] assignToVar: Attempted to store BallerinaString* as i8* for variable '%s' - this would corrupt the data!\n", birVar.BIRName)
+				fmt.Printf("[ERROR] assignToVar: The alloca should have been created as BallerinaString*, not i8*\n")
+				return
+			}
+		}
+
+		// Handle compatible type conversions
+		var castedVal value.Value = llvmVal
+
+		// Handle pointer type conversions
+		if _, isAllocaPtr := allocaType.(*types.PointerType); isAllocaPtr {
+			if _, isValPtr := valType.(*types.PointerType); isValPtr {
+				// Both are pointers - safe to bitcast
+				castedVal = llvmBB.NewBitCast(llvmVal, allocaType)
+				fmt.Printf("[DEBUG] assignToVar: Bitcast between pointer types for variable '%s'\n", birVar.BIRName)
+			} else if valType.Equal(types.I8Ptr) {
+				// Source is generic i8* pointer
+				castedVal = llvmBB.NewBitCast(llvmVal, allocaType)
+				fmt.Printf("[DEBUG] assignToVar: Cast i8* to pointer type for variable '%s'\n", birVar.BIRName)
+			} else {
+				fmt.Printf("[WARNING] assignToVar: Cannot cast non-pointer type %s to pointer type %s for variable '%s'\n",
+					valType, allocaType, birVar.BIRName)
+				return
+			}
+		} else if allocaType.Equal(types.I8Ptr) {
+			if _, isValPtr := valType.(*types.PointerType); isValPtr {
+				// Target is generic i8* pointer, source is specific pointer
+				castedVal = llvmBB.NewBitCast(llvmVal, types.I8Ptr)
+				fmt.Printf("[DEBUG] assignToVar: Cast pointer to i8* for variable '%s'\n", birVar.BIRName)
+			} else {
+				fmt.Printf("[WARNING] assignToVar: Cannot cast non-pointer type %s to i8* for variable '%s'\n",
+					valType, birVar.BIRName)
+				return
+			}
+		} else {
+			// Non-pointer types - check for valid conversions
+			if isValidNonPointerConversion(valType, allocaType) {
+				// For now, just store as-is for compatible non-pointer types
+				castedVal = llvmVal
+				fmt.Printf("[DEBUG] assignToVar: Non-pointer assignment for variable '%s'\n", birVar.BIRName)
+			} else {
+				fmt.Printf("[WARNING] assignToVar: Type mismatch for variable '%s': alloca type %s, value type %s - skipping assignment\n",
+					birVar.BIRName, allocaType, valType)
+				return
+			}
+		}
+
+		llvmBB.NewStore(castedVal, alloca)
+		fmt.Printf("[DEBUG] assignToVar: Successfully stored value for variable '%s'\n", birVar.BIRName)
+	} else {
+		fmt.Printf("[WARNING] assignToVar: Variable '%s' not found in varMap\n", birVar.BIRName)
+	}
+}
+
+func (cg *CodeGenerator) loadVar(birVar *bir.Variable, llvmBB *ir.Block) value.Value {
+	if alloca, ok := cg.varMap[birVar.BIRName]; ok {
+		allocaType := alloca.Type().(*types.PointerType).ElemType
+		expectedType := cg.birTypeToLLVMType(birVar.Type)
+
+		fmt.Printf("[DEBUG] loadVar: Loading variable '%s', stored as: %s, expected: %s\n",
+			birVar.BIRName, allocaType, expectedType)
+
+		loadedVal := llvmBB.NewLoad(allocaType, alloca)
+
+		// If types match exactly, return as-is
+		if allocaType.Equal(expectedType) {
+			fmt.Printf("[DEBUG] loadVar: Direct load for variable '%s'\n", birVar.BIRName)
+			return loadedVal
+		}
+
+		// Handle BallerinaString* loading specially
+		ballerinaStringPtrType := types.NewPointer(cg.structTypes["BallerinaString"])
+
+		// If we're loading a string variable and expect BallerinaString*
+		if birVar.Type == "string" && expectedType.Equal(ballerinaStringPtrType) {
+			if allocaType.Equal(ballerinaStringPtrType) {
+				// Direct load - already BallerinaString*
+				fmt.Printf("[DEBUG] loadVar: Direct BallerinaString* load for variable '%s'\n", birVar.BIRName)
+				return loadedVal
+			} else if allocaType.Equal(types.I8Ptr) {
+				// Cast from i8* to BallerinaString*
+				castedVal := llvmBB.NewBitCast(loadedVal, ballerinaStringPtrType)
+				fmt.Printf("[DEBUG] loadVar: Cast i8* to BallerinaString* for variable '%s'\n", birVar.BIRName)
+				return castedVal
+			}
+		}
+
+		// Handle compatible type conversions
+
+		// Handle pointer type conversions
+		if _, isAllocaPtr := allocaType.(*types.PointerType); isAllocaPtr {
+			if _, isExpectedPtr := expectedType.(*types.PointerType); isExpectedPtr {
+				// Both are pointers - safe to bitcast
+				castedVal := llvmBB.NewBitCast(loadedVal, expectedType)
+				fmt.Printf("[DEBUG] loadVar: Bitcast between pointer types for variable '%s'\n", birVar.BIRName)
+				return castedVal
+			} else if expectedType.Equal(types.I8Ptr) {
+				// Expected is generic i8* pointer
+				castedVal := llvmBB.NewBitCast(loadedVal, types.I8Ptr)
+				fmt.Printf("[DEBUG] loadVar: Cast pointer to i8* for variable '%s'\n", birVar.BIRName)
+				return castedVal
+			} else {
+				fmt.Printf("[WARNING] loadVar: Cannot cast pointer type %s to non-pointer type %s for variable '%s'\n",
+					allocaType, expectedType, birVar.BIRName)
+				return constant.NewUndef(expectedType)
+			}
+		} else if allocaType.Equal(types.I8Ptr) {
+			if _, isExpectedPtr := expectedType.(*types.PointerType); isExpectedPtr {
+				// Stored as generic i8* pointer, expected specific pointer
+				castedVal := llvmBB.NewBitCast(loadedVal, expectedType)
+				fmt.Printf("[DEBUG] loadVar: Cast i8* to pointer type for variable '%s'\n", birVar.BIRName)
+				return castedVal
+			} else {
+				fmt.Printf("[WARNING] loadVar: Cannot cast i8* to non-pointer type %s for variable '%s'\n",
+					expectedType, birVar.BIRName)
+				return constant.NewUndef(expectedType)
+			}
+		} else {
+			// Non-pointer types
+			if isValidNonPointerConversion(allocaType, expectedType) {
+				fmt.Printf("[DEBUG] loadVar: Non-pointer load for variable '%s'\n", birVar.BIRName)
+				return loadedVal
+			} else {
+				fmt.Printf("[WARNING] loadVar: Type mismatch for variable '%s': stored as %s, expected %s\n",
+					birVar.BIRName, allocaType, expectedType)
+				return constant.NewUndef(expectedType)
+			}
+		}
+	} else {
+		fmt.Printf("[WARNING] loadVar: Variable '%s' not found in varMap\n", birVar.BIRName)
+		return constant.NewUndef(cg.birTypeToLLVMType(birVar.Type))
+	}
+}
+
+// Helper function to check if non-pointer type conversion is valid
+func isValidNonPointerConversion(fromType, toType types.Type) bool {
+	// Allow conversions between same basic types
+	if fromType.Equal(toType) {
+		return true
+	}
+
+	// Allow integer type conversions
+	if _, isFromInt := fromType.(*types.IntType); isFromInt {
+		if _, isToInt := toType.(*types.IntType); isToInt {
+			return true // Allow int-to-int conversions
+		}
+	}
+
+	// Allow void conversions (should not happen in practice)
+	if fromType.Equal(types.Void) || toType.Equal(types.Void) {
+		return true
+	}
+
+	// Don't allow boolean to pointer or other incompatible conversions
+	return false
+}
+
+// getLLVMFunction retrieves a declared LLVM function.
+func (cg *CodeGenerator) getLLVMFunction(name string) *ir.Func {
+	if fn, ok := cg.functions[name]; ok {
+		return fn
+	}
+	for _, f := range cg.module.Funcs {
+		if f.Name() == name {
+			cg.functions[name] = f
+			return f
+		}
+	}
+	fmt.Printf("[WARNING] getLLVMFunction: Function '%s' not found.\n", name)
+	return nil
+}
+
+// getSizeOfType calculates the size of an LLVM type
+func (cg *CodeGenerator) getSizeOfType(typ types.Type) int64 {
+	if cg.module.DataLayout == "" {
+		tm, err := NewLLVMTargetMachine()
+		if err != nil {
+			panic(fmt.Errorf("getSizeOfType: failed to create target machine for data layout: %v", err))
+		}
+		defer tm.Close()
+		targetDataRef := C.LLVMCreateTargetDataLayout(tm.machine)
+		if targetDataRef == nil {
+			panic("getSizeOfType: failed to get target data layout ref")
+		}
+		defer C.LLVMDisposeTargetData(targetDataRef)
+		cg.module.DataLayout = C.GoString(C.LLVMCopyStringRepOfTargetData(targetDataRef))
+		fmt.Printf("[DEBUG] getSizeOfType: DataLayout not set on module, initialized to: %s\n", cg.module.DataLayout)
+	}
+
+	// Create a temporary target data from the data layout string
+	dataLayoutCStr := C.CString(cg.module.DataLayout)
+	defer C.free(unsafe.Pointer(dataLayoutCStr))
+
+	targetDataRef := C.LLVMCreateTargetData(dataLayoutCStr)
+	if targetDataRef == nil {
+		panic(fmt.Sprintf("getSizeOfType: failed to create target data from layout string: %s", cg.module.DataLayout))
+	}
+	defer C.LLVMDisposeTargetData(targetDataRef)
+
+	var size int64
+
+	switch t := typ.(type) {
+	case *types.IntType:
+		switch t.BitSize {
+		case 1:
+			size = 1
+		case 8:
+			size = 1
+		case 16:
+			size = 2
+		case 32:
+			size = 4
+		case 64:
+			size = 8
+		default:
+			size = (int64(t.BitSize) + 7) / 8
+		}
+	case *types.FloatType:
+		switch t.Kind {
+		case types.FloatKindFloat:
+			size = 4
+		case types.FloatKindDouble:
+			size = 8
+		default:
+			size = 8
+		}
+	case *types.PointerType:
+		size = int64(C.LLVMPointerSize(targetDataRef))
+	case *types.ArrayType:
+		elemSize := cg.getSizeOfType(t.ElemType)
+		size = int64(t.Len) * elemSize
+	case *types.StructType:
+		totalSize := int64(0)
+		for _, field := range t.Fields {
+			totalSize += cg.getSizeOfType(field)
+		}
+		size = totalSize
+	default:
+		size = int64(C.LLVMPointerSize(targetDataRef))
+		fmt.Printf("[WARNING] getSizeOfType: Unknown type %T, defaulting to pointer size %d\n", typ, size)
+	}
+
+	return size
+}

@@ -15,6 +15,11 @@ package backend
 // typedef struct LLVMOpaqueCGSCCAnalysisManager *LLVMCGSCCAnalysisManagerRef;
 // typedef struct LLVMOpaqueModuleAnalysisManager *LLVMModuleAnalysisManagerRef;
 // typedef struct LLVMOpaquePassBuilder *LLVMPassBuilderRef;
+// typedef LLVMTargetDataRef LLVMTargetDataRef; // Already in Core.h but good to be explicit if needed elsewhere
+//
+// LLVMTargetDataRef LLVMCreateTargetDataLayout(LLVMTargetMachineRef TM); // This is the correct one
+// char *LLVMCopyStringRepOfTargetData(LLVMTargetDataRef TD);
+// void LLVMDisposeTargetData(LLVMTargetDataRef TD);
 //
 // LLVMLoopAnalysisManagerRef LLVMCreateLoopAnalysisManager(void);
 // LLVMFunctionAnalysisManagerRef LLVMCreateFunctionAnalysisManager(void);
@@ -46,6 +51,10 @@ package backend
 // #define LLVMO3 3
 // #define LLVMOS 4
 // #define LLVMOSIZE 5
+//
+// LLVMTargetDataRef LLVMCreateTargetData(const char *StringRep);
+// unsigned LLVMPointerSize(LLVMTargetDataRef TD);
+//
 import "C"
 import (
 	"fmt"
@@ -54,12 +63,7 @@ import (
 
 // Initialize LLVM
 func init() {
-	// LLVM native target initialization
-	C.LLVMInitializeNativeTarget()
-	C.LLVMInitializeNativeAsmPrinter()
-	C.LLVMInitializeNativeAsmParser()
-
-	// Also initialize all targets for better portability
+	// Initialize all targets for better portability
 	C.LLVMInitializeAllTargetInfos()
 	C.LLVMInitializeAllTargets()
 	C.LLVMInitializeAllTargetMCs()
