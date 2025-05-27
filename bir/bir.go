@@ -540,6 +540,13 @@ func (e *Emitter) Emit(fileNode *parser.FileNode) (*Package, error) {
 				return nil, fmt.Errorf("failed to emit function %s: %w", node.Name.Value, err)
 			}
 			e.birPackage.Functions = append(e.birPackage.Functions, fnBir)
+		case *parser.ServiceDeclarationNode:
+			// Handle service declarations by converting resource functions to BIR functions
+			serviceFuncs, err := e.emitServiceDeclaration(node)
+			if err != nil {
+				return nil, fmt.Errorf("failed to emit service declaration: %w", err)
+			}
+			e.birPackage.Functions = append(e.birPackage.Functions, serviceFuncs...)
 		default:
 		}
 	}
@@ -1170,4 +1177,36 @@ func (e *Emitter) emitBinaryExpression(binary *parser.BinaryExpressionNode, isDi
 	})
 
 	return resultVar
+}
+
+// emitServiceDeclaration converts a service declaration to BIR functions
+// Each resource function becomes a separate BIR function with a standardized name
+func (e *Emitter) emitServiceDeclaration(service *parser.ServiceDeclarationNode) ([]*Function, error) {
+	var functions []*Function
+
+	for _, resource := range service.Resources {
+		// Create a standardized function name for the resource
+		// Format: main$<method>_<name>.0 (e.g., main$get_greeting.0)
+		funcName := fmt.Sprintf("main$%s_%s.0", resource.Method.Value, resource.Name.Value)
+
+		// Convert ResourceFunction to FunctionDefinitionNode
+		funcDef := &parser.FunctionDefinitionNode{
+			Token:      resource.Token,
+			Visibility: "public", // Resource functions are public
+			Name:       &parser.IdentifierNode{Token: resource.Name.Token, Value: funcName},
+			Parameters: resource.Parameters,
+			ReturnType: resource.ReturnType,
+			Body:       resource.Body,
+		}
+
+		// Emit the function using existing emitFunctionDefinition logic
+		birFunc, err := e.emitFunctionDefinition(funcDef)
+		if err != nil {
+			return nil, fmt.Errorf("failed to emit resource function %s: %w", funcName, err)
+		}
+
+		functions = append(functions, birFunc)
+	}
+
+	return functions, nil
 }

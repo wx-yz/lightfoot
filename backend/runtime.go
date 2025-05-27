@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/llir/llvm/ir"
@@ -175,6 +176,13 @@ func (cg *CodeGenerator) AddRuntimeFunctions() {
 			ir.NewParam("handler", resourceFuncPtrType),
 		)
 		cg.functions["ballerina_http_register_resource"] = fn
+	}
+
+	// HTTP Server Wait Function
+	if _, ok := cg.functions["ballerina_http_server_wait"]; !ok {
+		fn := cg.module.NewFunc("ballerina_http_server_wait", types.Void)
+		cg.functions["ballerina_http_server_wait"] = fn
+		fmt.Printf("[DEBUG] AddRuntimeFunctions: Added ballerina_http_server_wait function\n")
 	}
 
 	// HTTP Response utility functions

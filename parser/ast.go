@@ -62,6 +62,51 @@ func (fdn *FunctionDefinitionNode) String() string          { return "FunctionDe
 func (fdn *FunctionDefinitionNode) statementNode()          {}
 func (fdn *FunctionDefinitionNode) StartToken() lexer.Token { return fdn.Token }
 
+// ServiceDeclarationNode represents a service declaration.
+// e.g., service / on new http:Listener(9090) { ... }
+type ServiceDeclarationNode struct {
+	Token     lexer.Token         // The 'service' token
+	Path      Expression          // The service path (e.g., /, /api/v1)
+	Listener  Expression          // The listener expression (e.g., new http:Listener(9090))
+	Resources []*ResourceFunction // The resource functions within the service
+}
+
+func (sdn *ServiceDeclarationNode) TokenLiteral() string    { return sdn.Token.Literal }
+func (sdn *ServiceDeclarationNode) String() string          { return "ServiceDeclaration" }
+func (sdn *ServiceDeclarationNode) statementNode()          {}
+func (sdn *ServiceDeclarationNode) StartToken() lexer.Token { return sdn.Token }
+
+// ResourceFunction represents a resource function within a service.
+// e.g., resource function get greeting() returns string { ... }
+type ResourceFunction struct {
+	Token      lexer.Token         // The 'resource' token
+	Method     *IdentifierNode     // HTTP method (get, post, etc.)
+	Name       *IdentifierNode     // Function name
+	Parameters []*ParameterNode    // Function parameters
+	ReturnType *TypeNode           // Return type
+	Body       *BlockStatementNode // Function body
+}
+
+func (rf *ResourceFunction) TokenLiteral() string { return rf.Token.Literal }
+func (rf *ResourceFunction) String() string {
+	return "ResourceFunction: " + rf.Method.Value + " " + rf.Name.Value
+}
+func (rf *ResourceFunction) statementNode()          {}
+func (rf *ResourceFunction) StartToken() lexer.Token { return rf.Token }
+
+// NewExpressionNode represents a 'new' expression for object creation.
+// e.g., new http:Listener(9090)
+type NewExpressionNode struct {
+	Token     lexer.Token  // The 'new' token
+	Type      Expression   // The type being instantiated (e.g., http:Listener)
+	Arguments []Expression // Constructor arguments
+}
+
+func (nen *NewExpressionNode) TokenLiteral() string    { return nen.Token.Literal }
+func (nen *NewExpressionNode) String() string          { return "new expression" }
+func (nen *NewExpressionNode) expressionNode()         {}
+func (nen *NewExpressionNode) StartToken() lexer.Token { return nen.Token }
+
 // ParameterNode represents a function parameter.
 type ParameterNode struct {
 	Token lexer.Token

@@ -13,12 +13,25 @@ import (
 func LinkObjectFile(objectFile, executableFile string) error {
 	cc := "cc" // Default C compiler command
 
-	// Get the absolute path to the runtime.o file
-	runtimeObjPath := filepath.Join(getRuntimeDir(), "runtime.o")
+	// Get the absolute path to the runtime object files
+	runtimeDir := getRuntimeDir()
+	runtimeObjPath := filepath.Join(runtimeDir, "runtime.o")
+	httpServerObjPath := filepath.Join(runtimeDir, "http_server.o")
+	goHttpLibPath := filepath.Join(runtimeDir, "http_server_go.a")
 
 	// Check if runtime.o exists
 	if _, err := os.Stat(runtimeObjPath); os.IsNotExist(err) {
 		return fmt.Errorf("runtime.o not found at %s - run 'make runtime' to build it", runtimeObjPath)
+	}
+
+	// Check if http_server.o exists
+	if _, err := os.Stat(httpServerObjPath); os.IsNotExist(err) {
+		return fmt.Errorf("http_server.o not found at %s - run 'make' in runtime directory to build it", httpServerObjPath)
+	}
+
+	// Check if Go HTTP library exists
+	if _, err := os.Stat(goHttpLibPath); os.IsNotExist(err) {
+		return fmt.Errorf("http_server_go.a not found at %s - run 'make' in runtime directory to build it", goHttpLibPath)
 	}
 
 	// First, verify that the object file contains ballerina_main
@@ -109,6 +122,10 @@ int main(int argc, char** argv) {
 		if runtime.GOARCH == "arm64" {
 			ldflags = append(ldflags, "-arch", "arm64")
 		}
+
+		// Add required macOS frameworks for Go CGO
+		ldflags = append(ldflags, "-framework", "CoreFoundation")
+		ldflags = append(ldflags, "-framework", "Security")
 	case "linux":
 		ldflags = append(ldflags, "-fPIC")
 	case "windows":
@@ -118,7 +135,7 @@ int main(int argc, char** argv) {
 	// Build command to compile the wrapper and link everything together
 	ldflags = append(ldflags, "-o", executableFile)
 	ldflags = append(ldflags, wrapperPath) // wrapper.c (not object)
-	ldflags = append(ldflags, objectFile, runtimeObjPath)
+	ldflags = append(ldflags, objectFile, runtimeObjPath, httpServerObjPath, goHttpLibPath)
 
 	// Add debugging symbols
 	ldflags = append(ldflags, "-g")

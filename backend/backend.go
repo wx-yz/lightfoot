@@ -177,9 +177,6 @@ func (cg *CodeGenerator) generateAllFunctions() {
 		// This depends on how BIR represents resource functions.
 	}
 
-	// Generate HTTP services (conceptual - depends on BIR structure)
-	cg.generateHTTPServices() // New function
-
 	// Now create the ballerina_main function that will be called from C
 	mainFunc := cg.module.NewFunc("ballerina_main", types.Void)
 
@@ -212,6 +209,9 @@ func (cg *CodeGenerator) generateAllFunctions() {
 
 	// Add the function to our map with a unique name
 	cg.functions["$ballerina_main_wrapper"] = mainFunc
+
+	// Generate HTTP services after the main wrapper is created
+	cg.generateHTTPServices()
 
 	// Print debug information about the ballerina_main function
 	fmt.Printf("[DEBUG] ballerina_main function: Linkage=%v, Visibility=%v, UnnamedAddr=%v\n",
@@ -279,6 +279,12 @@ func (cg *CodeGenerator) generateHTTPServices() {
 			wrapperFuncPtr := cg.getLLVMFunction(wrapperFuncName)
 
 			entryBlock.NewCall(registerFunc, pathStr, methodStr, wrapperFuncPtr)
+		}
+
+		// 5. Keep the server running by calling the wait function
+		waitFunc := cg.getLLVMFunction("ballerina_http_server_wait")
+		if waitFunc != nil {
+			entryBlock.NewCall(waitFunc)
 		}
 	}
 
@@ -1030,7 +1036,7 @@ func (cg *CodeGenerator) getLLVMFunction(name string) *ir.Func {
 			return f
 		}
 	}
-	fmt.Printf("[WARNING] getLLVMFunction: Function '%s' not found.\n", name)
+	fmt.Printf("[WARNING] getLLVMFunction: Function '%s' (and C-style '%s') not found in cg.functions map.\n", name, strings.Replace(name, ".", "_", -1))
 	return nil
 }
 

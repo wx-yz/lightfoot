@@ -66,6 +66,8 @@ func NewParser(tokens []lexer.Token) *Parser {
 	p.registerPrefix(lexer.TokenStringLiteral, p.parseStringLiteral)
 	p.registerPrefix(lexer.TokenBooleanLiteral, p.parseBooleanLiteral)
 	p.registerPrefix(lexer.TokenLParen, p.parseGroupedExpression)
+	p.registerPrefix(lexer.TokenSlash, p.parseSlashLiteral)  // Add support for / as service path
+	p.registerPrefix(lexer.TokenKwNew, p.parseNewExpression) // Add support for new expressions
 
 	p.infixParseFns = make(map[lexer.TokenType]infixParseFn)
 	p.registerInfix(lexer.TokenEqual, p.parseAssignmentExpression)
@@ -172,6 +174,13 @@ func (p *Parser) ParseFile() (*FileNode, error) {
 				fileNode.Definitions = append(fileNode.Definitions, fn)
 			} else {
 				parsedSuccessfully = false // parseFunctionDefinition failed
+			}
+		case lexer.TokenKwService:
+			svc := p.parseServiceDeclaration()
+			if svc != nil {
+				fileNode.Definitions = append(fileNode.Definitions, svc)
+			} else {
+				parsedSuccessfully = false // parseServiceDeclaration failed
 			}
 		default:
 			p.errorUnexpectedToken("unexpected top-level token", currentTokenForSwitch)
@@ -287,6 +296,54 @@ func (p *Parser) parseBooleanLiteral() Expression {
 	val := tok.Literal == "true"
 	p.nextToken()
 	return &BooleanLiteralNode{Token: tok, Value: val}
+}
+
+// parseSlashLiteral parses a '/' token as a service path
+func (p *Parser) parseSlashLiteral() Expression {
+	tok := p.currentToken()
+	if tok.Type != lexer.TokenSlash {
+		p.errorUnexpectedToken("expected slash", tok)
+		return nil
+	}
+	// Treat "/" as a string literal for service paths
+	p.nextToken()
+	return &StringLiteralNode{Token: tok, Value: "/"}
+}
+
+// parseNewExpression parses a 'new' expression for object creation
+// Format: new <type>(<args>)
+// Example: new http:Listener(9090)
+func (p *Parser) parseNewExpression() Expression {
+	tok := p.currentToken()
+	if tok.Type != lexer.TokenKwNew {
+		p.errorUnexpectedToken("expected 'new'", tok)
+		return nil
+	}
+	p.nextToken()
+
+	// Parse the type (could be a member access like http:Listener)
+	typeToken := p.currentToken()
+	typeExpr := p.parseExpression(Call) // Use Call precedence to allow member access to be parsed
+	if typeExpr == nil {
+		p.errorUnexpectedToken("expected type after 'new'", typeToken)
+		return nil
+	}
+
+	// Now we should be at the opening parenthesis of the constructor call
+	if p.currentToken().Type != lexer.TokenLParen {
+		p.errorExpectedToken(lexer.TokenLParen, p.currentToken())
+		return nil
+	}
+
+	// Consume the opening parenthesis before calling parseExpressionList
+	p.nextToken()
+
+	arguments := p.parseExpressionList(lexer.TokenRParen)
+	if arguments == nil {
+		return nil
+	}
+
+	return &NewExpressionNode{Token: tok, Type: typeExpr, Arguments: arguments}
 }
 
 func (p *Parser) parseGroupedExpression() Expression {
@@ -798,5 +855,143 @@ func (p *Parser) parseExpressionStatement() *ExpressionStatementNode {
 	if !p.expectToken(lexer.TokenSemicolon) {
 		return nil
 	}
+	return stmt
+}
+
+// parseServiceDeclaration parses a service declaration.
+// Format: service <path> on <listener> { <resources> }
+// Example: service / on new http:Listener(9090) { resource function get greeting() returns string { ... } }
+func (p *Parser) parseServiceDeclaration() *ServiceDeclarationNode {
+	stmt := &ServiceDeclarationNode{Token: p.currentToken()}
+
+	if !p.expectToken(lexer.TokenKwService) {
+		return nil
+	}
+
+	// Parse service path (e.g., /, /api/v1)
+	pathToken := p.currentToken()
+	stmt.Path = p.parseExpression(Lowest)
+	if stmt.Path == nil {
+		p.errorUnexpectedToken("expected service path after 'service'", pathToken)
+		return nil
+	}
+
+	// Expect 'on' keyword
+	if !p.expectToken(lexer.TokenKwOn) {
+		return nil
+	}
+
+	// Parse listener expression (e.g., new http:Listener(9090))
+	listenerToken := p.currentToken()
+	stmt.Listener = p.parseExpression(Lowest)
+	if stmt.Listener == nil {
+		p.errorUnexpectedToken("expected listener expression after 'on'", listenerToken)
+		return nil
+	}
+
+	// Expect opening brace for service body
+	if !p.expectToken(lexer.TokenLBrace) {
+		return nil
+	}
+
+	// Parse resource functions
+	stmt.Resources = []*ResourceFunction{}
+	for p.currentToken().Type != lexer.TokenRBrace && p.currentToken().Type != lexer.TokenEOF {
+		resourceToken := p.currentToken()
+		if resourceToken.Type == lexer.TokenKwResource {
+			resource := p.parseResourceFunction()
+			if resource != nil {
+				stmt.Resources = append(stmt.Resources, resource)
+			} else {
+				p.errorUnexpectedToken("failed to parse resource function", resourceToken)
+				p.nextToken() // Skip problematic token
+			}
+		} else {
+			p.errorUnexpectedToken("expected 'resource' in service body", resourceToken)
+			p.nextToken() // Skip unexpected token
+		}
+	}
+
+	if !p.expectToken(lexer.TokenRBrace) {
+		return nil
+	}
+
+	return stmt
+}
+
+// parseResourceFunction parses a resource function within a service.
+// Format: resource function <method> <name>(<params>) returns <type> { <body> }
+// Example: resource function get greeting() returns string { return "Hello, World!"; }
+func (p *Parser) parseResourceFunction() *ResourceFunction {
+	stmt := &ResourceFunction{Token: p.currentToken()}
+
+	if !p.expectToken(lexer.TokenKwResource) {
+		return nil
+	}
+
+	if !p.expectToken(lexer.TokenKwFunction) {
+		return nil
+	}
+
+	// Parse HTTP method (get, post, etc.)
+	methodToken := p.currentToken()
+	methodExpr := p.parseIdentifier()
+	if methodExpr == nil {
+		return nil
+	}
+	methodIdent, ok := methodExpr.(*IdentifierNode)
+	if !ok {
+		p.errorUnexpectedToken("resource method must be an identifier", methodToken)
+		return nil
+	}
+	stmt.Method = methodIdent
+
+	// Parse resource name
+	nameToken := p.currentToken()
+	nameExpr := p.parseIdentifier()
+	if nameExpr == nil {
+		return nil
+	}
+	nameIdent, ok := nameExpr.(*IdentifierNode)
+	if !ok {
+		p.errorUnexpectedToken("resource name must be an identifier", nameToken)
+		return nil
+	}
+	stmt.Name = nameIdent
+
+	// Parse parameters
+	if !p.expectToken(lexer.TokenLParen) {
+		return nil
+	}
+	stmt.Parameters = p.parseFunctionParameters()
+	if stmt.Parameters == nil && len(p.errors) > 0 && p.currentToken().Type != lexer.TokenRParen {
+		return nil
+	}
+	if !p.expectToken(lexer.TokenRParen) {
+		return nil
+	}
+
+	// Parse return type (optional)
+	if p.currentToken().Literal == "returns" {
+		p.nextToken()
+		returnTypeToken := p.currentToken()
+		stmt.ReturnType = p.parseType()
+		if stmt.ReturnType == nil {
+			p.errorUnexpectedToken("expected return type after 'returns' keyword", returnTypeToken)
+			return nil
+		}
+	}
+
+	// Parse function body
+	bodyToken := p.currentToken()
+	if bodyToken.Type != lexer.TokenLBrace {
+		p.errorExpectedToken(lexer.TokenLBrace, bodyToken)
+		return nil
+	}
+	stmt.Body = p.parseBlockStatement()
+	if stmt.Body == nil {
+		return nil
+	}
+
 	return stmt
 }

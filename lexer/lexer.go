@@ -48,7 +48,11 @@ const (
 	TokenKwstring // Note: string is a predefined type, not a strict keyword in all contexts, but treated as such for simplicity
 	TokenKwIf
 	TokenKwElse
-	TokenKwVar // for inferred type (not fully implemented in this subset)
+	TokenKwVar      // for inferred type (not fully implemented in this subset)
+	TokenKwService  // for service declarations
+	TokenKwResource // for resource functions
+	TokenKwOn       // for service attachment (service / on new http:Listener())
+	TokenKwNew      // for new object creation
 	keywordEnd
 )
 
@@ -125,6 +129,14 @@ func (t TokenType) String() string {
 		return "KwElse"
 	case TokenKwVar:
 		return "KwVar"
+	case TokenKwService:
+		return "KwService"
+	case TokenKwResource:
+		return "KwResource"
+	case TokenKwOn:
+		return "KwOn"
+	case TokenKwNew:
+		return "KwNew"
 	default:
 		return fmt.Sprintf("UnknownToken(%d)", t)
 	}
@@ -161,6 +173,10 @@ var keywords = map[string]TokenType{
 	"true":     TokenBooleanLiteral,
 	"false":    TokenBooleanLiteral,
 	"var":      TokenKwVar,
+	"service":  TokenKwService,
+	"resource": TokenKwResource,
+	"on":       TokenKwOn,
+	"new":      TokenKwNew,
 }
 
 // NewLexer creates a new Lexer.

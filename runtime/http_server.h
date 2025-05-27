@@ -34,6 +34,9 @@ int ballerina_http_server_start(int port, int register_service_handlers_now);
 // The C runtime will call this function when a matching request arrives.
 void ballerina_http_register_resource(const char* path, const char* method, ballerina_resource_func_ptr handler);
 
+// Keeps the HTTP server running (blocks)
+void ballerina_http_server_wait();
+
 // Functions to interact with request/response from Ballerina (called from LLVM IR)
 void ballerina_http_response_set_string_body(BallerinaHTTPResponse* resp, BallerinaString* body_str);
 void ballerina_http_response_set_status_code(BallerinaHTTPResponse* resp, int status_code);

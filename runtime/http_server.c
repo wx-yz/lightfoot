@@ -3,10 +3,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-// --- Stubs for HTTP server ---
-// In a real scenario, you'd use a library like libmicrohttpd or similar.
+// Declare the Go functions
+extern int ballerina_http_server_start_go(int port, int register_service_handlers_now);
+extern void ballerina_http_register_resource_go(const char* path, const char* method, void* handler);
+extern void ballerina_http_server_wait_go();
 
-// Placeholder for registered resources
+// Placeholder for registered resources (for debugging)
 #define MAX_RESOURCES 10
 typedef struct {
     char path[256];
@@ -21,15 +23,13 @@ int server_started_port = -1;
 int ballerina_http_server_start(int port, int register_service_handlers_now) {
     if (server_started_port != -1) {
         printf("HTTP Server: Already started on port %d\n", server_started_port);
-        // Potentially allow re-configuration or return an error
-        // For now, just note it.
+        return 0;
     }
     server_started_port = port;
-    printf("HTTP Server: STUB: 'Starting' server on port %d. Call register_service_handlers_now=%d\n", port, register_service_handlers_now);
-    // Actual server initialization would go here.
-    // If register_service_handlers_now is true, it implies a model where handlers are registered after this call.
-    // If false, it might imply handlers were registered before starting.
-    return 0; // Success
+    printf("HTTP Server: Starting real Gin server on port %d\n", port);
+    
+    // Call the Go function to start the server
+    return ballerina_http_server_start_go(port, register_service_handlers_now);
 }
 
 void ballerina_http_register_resource(const char* path, const char* method, ballerina_resource_func_ptr handler) {
@@ -38,48 +38,42 @@ void ballerina_http_register_resource(const char* path, const char* method, ball
         strncpy(resources[resource_count].method, method, sizeof(resources[resource_count].method) - 1);
         resources[resource_count].handler = handler;
         resource_count++;
-        printf("HTTP Server: STUB: Registered resource: %s %s\n", method, path);
-
-        // Example of how a request might be dispatched (very simplified):
-        if (strcmp(path, "/greeting") == 0 && strcmp(method, "GET") == 0) {
-            printf("HTTP Server: STUB: Simulating GET /greeting request...\n");
-            BallerinaHTTPRequest req_obj;
-            req_obj.path = "/greeting";
-            req_obj.method = "GET";
-            const char* req_body_c_str = "Simulated Request Body";
-            req_obj.placeholder_body = ballerina_string_new_with_literal(req_body_c_str, strlen(req_body_c_str));
-
-            BallerinaHTTPResponse resp_obj;
-            resp_obj.status_code = 0; // Not set yet
-            resp_obj.body = NULL;     // Not set yet
-
-            handler(&req_obj, &resp_obj); // Call the Ballerina resource function
-
-            printf("HTTP Server: STUB: Ballerina resource function executed.\n");
-            printf("HTTP Server: STUB: Response status: %d\n", resp_obj.status_code);
-            if (resp_obj.body != NULL && resp_obj.body->data != NULL) {
-                printf("HTTP Server: STUB: Response body: %s\n", resp_obj.body->data);
-            } else {
-                printf("HTTP Server: STUB: Response body: (null)\n");
-            }
-            // In a real server, you'd send this response back to the client.
-            // Free BallerinaString objects if they were created by the handler or runtime
-            // If placeholder_body was allocated by ballerina_string_new_with_literal, it needs to be freed.
-            // Assuming a convention where runtime-created strings are freed by the runtime or caller.
-            // For this stub, let's assume it's managed. If ballerina_string_new_with_literal allocates,
-            // and this is the end of its life, it should be freed.
-            // For now, to match the commented out free:
-            if (req_obj.placeholder_body) {
-                 // free(req_obj.placeholder_body->data); // ballerina_string_new_with_literal allocates data
-                 // free(req_obj.placeholder_body);       // and the struct itself
-                 // This should be handled by a proper Ballerina GC or explicit free function for BallerinaString*
-            }
-            // if (resp_obj.body) free(resp_obj.body); // Responsibility for freeing response body needs to be clear
-        }
-
+        printf("HTTP Server: Registering resource: %s %s\n", method, path);
+        
+        // Call the Go function to register the resource
+        ballerina_http_register_resource_go(path, method, (void*)handler);
     } else {
-        fprintf(stderr, "HTTP Server: STUB: Max resources reached. Cannot register %s %s.\n", method, path);
+        fprintf(stderr, "HTTP Server: Max resources reached. Cannot register %s %s.\n", method, path);
     }
+}
+
+// Function to keep the HTTP server running
+void ballerina_http_server_wait() {
+    printf("HTTP Server: Waiting for server to handle requests...\n");
+    ballerina_http_server_wait_go();
+}
+
+// C function to call Ballerina resource function (called from Go)
+BallerinaString* call_ballerina_resource_function(void* handler) {
+    if (!handler) return NULL;
+    
+    ballerina_resource_func_ptr func = (ballerina_resource_func_ptr)handler;
+    
+    // Create a dummy request and response
+    BallerinaHTTPRequest req_obj;
+    req_obj.path = "/greeting";
+    req_obj.method = "GET";
+    req_obj.placeholder_body = NULL;
+
+    BallerinaHTTPResponse resp_obj;
+    resp_obj.status_code = 200;
+    resp_obj.body = NULL;
+
+    // Call the Ballerina resource function
+    func(&req_obj, &resp_obj);
+
+    // Return the response body
+    return resp_obj.body;
 }
 
 // --- Implementation for Ballerina-facing HTTP utility functions ---
