@@ -83,6 +83,7 @@ func NewParser(tokens []lexer.Token) *Parser {
 	p.registerInfix(lexer.TokenGreaterThanOrEqual, p.parseInfixExpression)
 	p.registerInfix(lexer.TokenLParen, p.parseCallExpression)
 	p.registerInfix(lexer.TokenColon, p.parseMemberAccessExpression)
+	p.registerInfix(lexer.TokenDot, p.parseMemberAccessExpression)
 
 	return p
 }
@@ -98,6 +99,20 @@ func (p *Parser) currentToken() lexer.Token {
 		return lexer.Token{Type: lexer.TokenEOF, Literal: "", Line: line, Column: col}
 	}
 	return p.tokens[p.pos]
+}
+
+// peekToken returns the next token without advancing the token position.
+func (p *Parser) peekToken() lexer.Token {
+	if p.pos+1 >= len(p.tokens) {
+		line, col := -1, -1
+		if len(p.tokens) > 0 {
+			last := p.tokens[len(p.tokens)-1]
+			line = last.Line
+			col = last.Column + len(last.Literal)
+		}
+		return lexer.Token{Type: lexer.TokenEOF, Literal: "", Line: line, Column: col}
+	}
+	return p.tokens[p.pos+1]
 }
 
 func (p *Parser) nextToken() {
@@ -169,11 +184,29 @@ func (p *Parser) ParseFile() (*FileNode, error) {
 				parsedSuccessfully = false // parseImportStatement failed
 			}
 		case lexer.TokenKwPublic, lexer.TokenKwFunction:
-			fn := p.parseFunctionDefinition()
-			if fn != nil {
-				fileNode.Definitions = append(fileNode.Definitions, fn)
+			// Check if this is an init function
+			if currentTokenForSwitch.Type == lexer.TokenKwFunction &&
+				(p.peekToken().Type == lexer.TokenKwInit || p.peekToken().Literal == "init") {
+				initFn := p.parseInitFunction()
+				if initFn != nil {
+					fileNode.Definitions = append(fileNode.Definitions, initFn)
+				} else {
+					parsedSuccessfully = false // parseInitFunction failed
+				}
 			} else {
-				parsedSuccessfully = false // parseFunctionDefinition failed
+				fn := p.parseFunctionDefinition()
+				if fn != nil {
+					fileNode.Definitions = append(fileNode.Definitions, fn)
+				} else {
+					parsedSuccessfully = false // parseFunctionDefinition failed
+				}
+			}
+		case lexer.TokenKwInit:
+			initFn := p.parseInitFunction()
+			if initFn != nil {
+				fileNode.Definitions = append(fileNode.Definitions, initFn)
+			} else {
+				parsedSuccessfully = false // parseInitFunction failed
 			}
 		case lexer.TokenKwService:
 			svc := p.parseServiceDeclaration()
@@ -181,6 +214,15 @@ func (p *Parser) ParseFile() (*FileNode, error) {
 				fileNode.Definitions = append(fileNode.Definitions, svc)
 			} else {
 				parsedSuccessfully = false // parseServiceDeclaration failed
+			}
+		// Check for global variables
+		case lexer.TokenKwInt, lexer.TokenKwstring, lexer.TokenKwBoolean, lexer.TokenKwFinal:
+			// Parse global variable declaration
+			globalVar := p.parseGlobalVariable()
+			if globalVar != nil {
+				fileNode.Definitions = append(fileNode.Definitions, globalVar)
+			} else {
+				parsedSuccessfully = false
 			}
 		default:
 			p.errorUnexpectedToken("unexpected top-level token", currentTokenForSwitch)
@@ -256,6 +298,38 @@ func (p *Parser) parseIdentifier() Expression {
 		p.errorUnexpectedToken("expected identifier", current)
 		return nil
 	}
+
+	// Special case for error constructor
+	if current.Literal == "error" && p.peekToken().Type == lexer.TokenLParen {
+		// This is an error constructor like error("message")
+		errorToken := current
+		p.nextToken() // Consume 'error'
+		p.nextToken() // Consume '('
+
+		// Parse the message (should be a string)
+		messageExpr := p.parseExpression(Lowest)
+		if messageExpr == nil {
+			p.errorUnexpectedToken("expected message in error constructor", p.currentToken())
+			return nil
+		}
+
+		// Consume ')'
+		if !p.expectToken(lexer.TokenRParen) {
+			return nil
+		}
+
+		// Create a specialized call expression for the error constructor
+		return &CallExpressionNode{
+			Token: errorToken,
+			Function: &IdentifierNode{
+				Token: errorToken,
+				Value: "error",
+			},
+			Arguments: []Expression{messageExpr},
+		}
+	}
+
+	// Regular identifier
 	ident := &IdentifierNode{Token: current, Value: current.Literal}
 	p.nextToken()
 	return ident
@@ -440,8 +514,8 @@ func (p *Parser) parseCallExpression(functionName Expression) Expression {
 }
 
 func (p *Parser) parseMemberAccessExpression(left Expression) Expression {
-	colonToken := p.currentToken()
-	p.nextToken() // Consume ':'
+	accessToken := p.currentToken()
+	p.nextToken() // Consume ':' or '.'
 
 	memberNameToken := p.currentToken()
 	memberNameExpr := p.parseIdentifier()
@@ -455,7 +529,7 @@ func (p *Parser) parseMemberAccessExpression(left Expression) Expression {
 	}
 
 	return &MemberAccessExpressionNode{
-		Token:      colonToken,
+		Token:      accessToken,
 		Expression: left,
 		MemberName: memberName,
 	}
@@ -611,6 +685,71 @@ func (p *Parser) parseFunctionDefinition() *FunctionDefinitionNode {
 	return stmt
 }
 
+// parseInitFunction parses an init function declaration.
+func (p *Parser) parseInitFunction() *InitFunctionNode {
+	token := p.currentToken() // 'function' token or 'init' token
+
+	// If starting with 'function', next token should be 'init'
+	if token.Type == lexer.TokenKwFunction {
+		p.nextToken()
+		// Accept either TokenKwInit (keyword) or "init" as an identifier
+		if p.currentToken().Type != lexer.TokenKwInit &&
+			!(p.currentToken().Type == lexer.TokenIdentifier && p.currentToken().Literal == "init") {
+			p.errors = append(p.errors, fmt.Sprintf("line %d, col %d: expected init, got %s",
+				p.currentToken().Line, p.currentToken().Column, p.currentToken().Type))
+			return nil
+		}
+	}
+
+	// Next token should be '('
+	p.nextToken()
+	if p.currentToken().Type != lexer.TokenLParen {
+		p.errors = append(p.errors, fmt.Sprintf("line %d, col %d: expected (, got %s",
+			p.currentToken().Line, p.currentToken().Column, p.currentToken().Type))
+		return nil
+	}
+
+	// Next token should be ')'
+	p.nextToken()
+	if p.currentToken().Type != lexer.TokenRParen {
+		p.errors = append(p.errors, fmt.Sprintf("line %d, col %d: expected ), got %s",
+			p.currentToken().Line, p.currentToken().Column, p.currentToken().Type))
+		return nil
+	}
+	p.nextToken() // Consume ')'
+
+	// Check for return type
+	var returnType *TypeNode
+	if p.currentToken().Type == lexer.TokenIdentifier && p.currentToken().Literal == "returns" {
+		p.nextToken() // Consume 'returns'
+
+		// Parse the return type
+		typeToken := p.currentToken()
+		typeName := typeToken.Literal
+		p.nextToken() // Consume the type name
+
+		// Check for question mark (optional type)
+		if p.currentToken().Type == lexer.TokenQuestionMark {
+			typeName += "?"
+			p.nextToken() // Consume the question mark
+		}
+
+		returnType = &TypeNode{Token: typeToken, TypeName: typeName}
+	}
+
+	// Parse the function body
+	body := p.parseBlockStatement()
+	if body == nil {
+		return nil
+	}
+
+	return &InitFunctionNode{
+		Token:      token,
+		ReturnType: returnType,
+		Body:       body,
+	}
+}
+
 func (p *Parser) parseFunctionParameters() []*ParameterNode {
 	params := []*ParameterNode{}
 	if p.currentToken().Type == lexer.TokenRParen {
@@ -665,19 +804,26 @@ func (p *Parser) parseParameter() *ParameterNode {
 }
 
 func (p *Parser) parseType() *TypeNode {
-	tok := p.currentToken()
-	typeName := ""
-
-	switch tok.Type {
+	switch p.currentToken().Type {
 	case lexer.TokenKwInt, lexer.TokenKwstring, lexer.TokenKwBoolean:
-		typeName = tok.Literal
+		typeName := p.currentToken().Literal
+		p.nextToken() // Consume the type name
+		return &TypeNode{Token: p.tokens[p.pos-1], TypeName: typeName}
 	case lexer.TokenIdentifier:
-		typeName = tok.Literal
+		typeName := p.currentToken().Literal
+		p.nextToken() // Consume the type name
+
+		// Handle optional type with question mark (e.g., error?)
+		if p.currentToken().Type == lexer.TokenQuestionMark {
+			typeName += "?"
+			p.nextToken() // Consume the question mark
+		}
+
+		return &TypeNode{Token: p.tokens[p.pos-1], TypeName: typeName}
 	default:
+		p.errorUnexpectedToken("expected type", p.currentToken())
 		return nil
 	}
-	p.nextToken()
-	return &TypeNode{Token: tok, TypeName: typeName}
 }
 
 func (p *Parser) parseBlockStatement() *BlockStatementNode {
@@ -994,4 +1140,54 @@ func (p *Parser) parseResourceFunction() *ResourceFunction {
 	}
 
 	return stmt
+}
+
+// parseGlobalVariable parses a global variable declaration.
+func (p *Parser) parseGlobalVariable() *GlobalVariableNode {
+	var node GlobalVariableNode
+
+	// Check if the variable is final
+	if p.currentToken().Type == lexer.TokenKwFinal {
+		node.Token = p.currentToken()
+		node.IsFinal = true
+		p.nextToken() // Consume 'final'
+	} else {
+		node.Token = p.currentToken() // Should be a type token
+	}
+
+	// Parse the type
+	typeNode := p.parseType()
+	if typeNode == nil {
+		return nil
+	}
+	node.Type = typeNode
+
+	// Parse the variable name
+	if p.currentToken().Type != lexer.TokenIdentifier {
+		p.errors = append(p.errors, fmt.Sprintf("line %d, col %d: expected identifier, got %s",
+			p.currentToken().Line, p.currentToken().Column, p.currentToken().Type))
+		return nil
+	}
+	node.Name = &IdentifierNode{Token: p.currentToken(), Value: p.currentToken().Literal}
+	p.nextToken() // Consume identifier
+
+	// Check for initializer
+	if p.currentToken().Type == lexer.TokenEqual {
+		p.nextToken() // Consume '='
+		initializer := p.parseExpression(Lowest)
+		if initializer == nil {
+			return nil
+		}
+		node.Initializer = initializer
+	}
+
+	// Expect semicolon
+	if p.currentToken().Type != lexer.TokenSemicolon {
+		p.errors = append(p.errors, fmt.Sprintf("line %d, col %d: expected semicolon, got %s",
+			p.currentToken().Line, p.currentToken().Column, p.currentToken().Type))
+		return nil
+	}
+	p.nextToken() // Consume ';'
+
+	return &node
 }

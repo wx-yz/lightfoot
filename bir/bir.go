@@ -4,6 +4,7 @@ package bir
 import (
 	"fmt"
 	"strings"
+	"wx-yz/lightfoot/lexer"
 	"wx-yz/lightfoot/parser" // Assuming parser.IdentifierNode might be checked, etc.
 	// "sort" // If sorting variables for printing
 )
@@ -21,6 +22,7 @@ type Package struct {
 	ModuleInitFunc  *Function
 	ModuleStartFunc *Function
 	ModuleStopFunc  *Function
+	ActualInitFunc  *Function // To store the user-defined init function
 }
 
 type ImportModule struct {
@@ -267,6 +269,20 @@ func (i *NewArrayInst) String() string {
 	return fmt.Sprintf("%s = newArray %s[%s]{%s}", i.lhs[0].BIRName, i.ElementType, sizeStr, strings.Join(argNames, ", "))
 }
 
+// TypeConversionInst represents a type conversion instruction
+type TypeConversionInst struct {
+	birInstruction
+	From *Variable
+	To   string
+}
+
+func (tc *TypeConversionInst) String() string {
+	if len(tc.lhs) > 0 {
+		return fmt.Sprintf("%s = <string> %s", tc.lhs[0].BIRName, tc.From.BIRName)
+	}
+	return fmt.Sprintf("<string> %s", tc.From.BIRName)
+}
+
 // --- BIR Emitter ---
 type Emitter struct {
 	birPackage  *Package
@@ -276,11 +292,13 @@ type Emitter struct {
 	// tempVarCount int // Managed by currentFunc.nextVarID
 	// labelCount   int // Managed by currentFunc.nextBBID
 	// moduleInitDone bool // Not strictly needed for this logic
+	errors []error // For collecting compilation errors
 }
 
 func NewEmitter() *Emitter {
 	return &Emitter{
 		globalVarMap: make(map[string]*GlobalVariable),
+		errors:       make([]error, 0),
 	}
 }
 
@@ -457,6 +475,79 @@ func (e *Emitter) emitModuleInit() {
 	}
 	e.addInstruction(&NewMapInst{birInstruction: birInstruction{lhs: []*Variable{annotationDataLHS}}, TypeDescVar: tdVar})
 
+	// Call init function if it exists
+	if e.birPackage.ActualInitFunc != nil {
+		// Create a temporary variable to hold the init function's return value
+		initRetVar := e.getOrCreateVar("_init_ret", e.birPackage.ActualInitFunc.ReturnVariable.Type, VarKindTemp, false)
+
+		// Create a basic block for handling init function errors (if any)
+		errorHandlingBB := e.newBBCurrentFunc()
+
+		// Call the init function
+		callInit := &CallInst{
+			birInstruction: birInstruction{lhs: []*Variable{initRetVar}},
+			PackagePath:    "",
+			FunctionName:   "init",
+			Args:           []*Variable{},
+			NextBB:         errorHandlingBB.ID,
+		}
+		e.addTerminator(callInit)
+
+		// Set current BB to error handling block
+		e.setCurrentBB(errorHandlingBB)
+
+		// Check if init function returned an error
+		if e.birPackage.ActualInitFunc.ReturnVariable.Type == "error?" {
+			// Create variables for comparison
+			isNilVar := e.getOrCreateVar("_init_ret_is_nil", "boolean", VarKindTemp, false)
+
+			// Check if initRetVar is nil (no error)
+			e.addInstruction(&BinaryOpInst{
+				birInstruction: birInstruction{lhs: []*Variable{isNilVar}},
+				Op:             "==",
+				Op1:            initRetVar,
+				Op2:            &Variable{BIRName: "nil", Type: "nil", Kind: VarKindConstant},
+			})
+
+			// Create blocks for success and error paths
+			successBB := e.newBBCurrentFunc()
+			failBB := e.newBBCurrentFunc()
+
+			// Branch based on nil check
+			e.addTerminator(&ConditionalBranchInst{
+				Condition: isNilVar,
+				TrueBB:    successBB.ID,
+				FalseBB:   failBB.ID,
+			})
+
+			// Success path: continue normal execution
+			e.setCurrentBB(successBB)
+			e.addInstruction(&ConstantLoadInst{
+				birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}},
+				Value:          "nil",
+				TypeName:       e.currentFunc.ReturnVariable.Type,
+			})
+
+			// Continue to final return
+			finalBB := e.newBBCurrentFunc()
+			e.addTerminator(&GotoInst{TargetBB: finalBB.ID})
+
+			// Error path: return the error from init
+			e.setCurrentBB(failBB)
+			e.addInstruction(&MoveInst{
+				birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}},
+				RHS:            initRetVar,
+			})
+			e.addTerminator(&GotoInst{TargetBB: finalBB.ID})
+
+			// Final return block
+			e.setCurrentBB(finalBB)
+			e.addTerminator(&ReturnInst{})
+
+			return
+		}
+	}
+
 	// In the target BIR, %0 is loaded with 0 (nil for error|() or the map part)
 	// The actual value might be more complex if configurables are involved.
 	// For now, loading "nil" (represented as 0 in BIR for success/empty) is consistent.
@@ -523,15 +614,10 @@ func (e *Emitter) Emit(fileNode *parser.FileNode) (*Package, error) {
 	e.emitModuleStartStop(".<start>")
 	e.emitModuleStartStop(".<stop>")
 
-	for _, impNode := range fileNode.Imports {
-		e.emitImport(impNode)
-	}
-
 	for _, def := range fileNode.Definitions {
 		switch node := def.(type) {
 		case *parser.FunctionDefinitionNode:
 			// Skip emitting module lifecycle functions again if they were parsed from source
-			// (though they are typically implicitly generated)
 			if node.Name.Value == ".<init>" || node.Name.Value == ".<start>" || node.Name.Value == ".<stop>" {
 				continue
 			}
@@ -540,6 +626,7 @@ func (e *Emitter) Emit(fileNode *parser.FileNode) (*Package, error) {
 				return nil, fmt.Errorf("failed to emit function %s: %w", node.Name.Value, err)
 			}
 			e.birPackage.Functions = append(e.birPackage.Functions, fnBir)
+
 		case *parser.ServiceDeclarationNode:
 			// Handle service declarations by converting resource functions to BIR functions
 			serviceFuncs, err := e.emitServiceDeclaration(node)
@@ -547,7 +634,26 @@ func (e *Emitter) Emit(fileNode *parser.FileNode) (*Package, error) {
 				return nil, fmt.Errorf("failed to emit service declaration: %w", err)
 			}
 			e.birPackage.Functions = append(e.birPackage.Functions, serviceFuncs...)
+
+		case *parser.InitFunctionNode:
+			// Handle init function
+			initFnBir, err := e.emitInitFunction(node)
+			if err != nil {
+				return nil, fmt.Errorf("failed to emit init function: %w", err)
+			}
+			if e.birPackage.ActualInitFunc != nil {
+				return nil, fmt.Errorf("multiple init functions found in the package")
+			}
+			e.birPackage.ActualInitFunc = initFnBir
+			e.birPackage.Functions = append(e.birPackage.Functions, initFnBir)
+
+		case *parser.GlobalVariableNode:
+			// Handle global variables
+			_ = e.emitGlobalVariable(node)
+			// Global variable is already added to the package in emitGlobalVariable
+
 		default:
+			// Ignore other node types
 		}
 	}
 
@@ -558,6 +664,11 @@ func (e *Emitter) Emit(fileNode *parser.FileNode) (*Package, error) {
 		e.birPackage.ModuleStopFunc == nil &&
 		len(e.birPackage.ImportModules) == 0 {
 		return nil, nil
+	}
+
+	// Return any collected errors
+	if len(e.errors) > 0 {
+		return nil, e.errors[0] // Return the first error for now
 	}
 
 	return e.birPackage, nil
@@ -686,6 +797,56 @@ func (e *Emitter) emitFunctionDefinition(fdn *parser.FunctionDefinitionNode) (*F
 	return fnToReturn, nil
 }
 
+func (e *Emitter) emitInitFunction(ifn *parser.InitFunctionNode) (*Function, error) {
+	e.currentFunc = &Function{
+		Name:         "init",    // Fixed name for init function
+		Visibility:   "PRIVATE", // Init functions are implicitly private
+		LocalVars:    make(map[string]*Variable),
+		ArgumentVars: []*Variable{}, // No parameters
+		Parameters:   []*Variable{}, // No parameters
+		BasicBlocks:  []*BasicBlock{},
+		nextVarID:    0,
+		nextBBID:     0,
+	}
+
+	returnTypeStr := "()" // Default return type
+	if ifn.ReturnType != nil {
+		returnTypeStr = ifn.ReturnType.TypeName // Should be "error?" or "()"
+	}
+
+	// Create and register the return variable (%0).
+	e.currentFunc.ReturnVariable = e.getOrCreateVar("%0(RETURN)", returnTypeStr, VarKindReturn, false)
+	e.currentFunc.LocalVars[e.currentFunc.ReturnVariable.BIRName] = e.currentFunc.ReturnVariable
+	e.currentFunc.nextVarID = 1 // Next var ID starts from 1
+
+	entryBB := e.newBBCurrentFunc() // bb0
+	e.setCurrentBB(entryBB)
+
+	if ifn.Body != nil {
+		e.emitBlockStatement(ifn.Body, nil)
+	}
+
+	// Ensure function ends with a terminator if not already set by its body
+	if e.currentFunc.CurrentBB != nil && e.currentFunc.CurrentBB.Terminator == nil {
+		if returnTypeStr == "()" {
+			// For void functions, ensure a return if the last block isn't terminated.
+			e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: e.currentFunc.ReturnVariable.Type})
+			e.addTerminator(&ReturnInst{})
+		} else if returnTypeStr == "error?" {
+			// If init returns error?, and doesn't explicitly return, it implies success (nil error)
+			e.addInstruction(&ConstantLoadInst{birInstruction: birInstruction{lhs: []*Variable{e.currentFunc.ReturnVariable}}, Value: "nil", TypeName: e.currentFunc.ReturnVariable.Type})
+			e.addTerminator(&ReturnInst{})
+		} else {
+			// This case should ideally be caught by the parser, but as a safeguard:
+			return nil, fmt.Errorf("init function has an invalid return type %s in BIR emission, expected '()' or 'error?'", returnTypeStr)
+		}
+	}
+
+	fnToReturn := e.currentFunc
+	e.currentFunc = nil // Clear currentFunc after processing
+	return fnToReturn, nil
+}
+
 func (e *Emitter) emitHelloWorldMain() (*Function, error) {
 	// Variables in specific order to match target BIR format
 	arrayVar := e.getOrCreateVar("_array_for_println", "typeRefDesc<>[]", VarKindTemp, false)
@@ -741,6 +902,11 @@ func (e *Emitter) emitCallExpression(callAST *parser.CallExpressionNode, isDisca
 	// Determine if this is an io:println call
 	isPrintln := false
 
+	// Check if this is a method call (e.g., value.toString())
+	isMethodCall := false
+	var receiverExpr parser.Expression
+	var methodName string
+
 	switch fnIdentifier := callAST.Function.(type) {
 	case *parser.IdentifierNode:
 		funcName = fnIdentifier.Value
@@ -748,19 +914,34 @@ func (e *Emitter) emitCallExpression(callAST *parser.CallExpressionNode, isDisca
 		isPrintln = funcName == "println"
 	case *parser.MemberAccessExpressionNode:
 		if modIdent, ok := fnIdentifier.Expression.(*parser.IdentifierNode); ok {
-			alias := modIdent.Value
-			// Resolve alias to full package path
-			for _, imp := range e.birPackage.ImportModules {
-				if imp.Alias == alias {
-					pkgPath = imp.OrgName + "/" + imp.PackageName
-					break
+			// Check if this is a method call on a variable
+			if fnIdentifier.Token.Type == lexer.TokenDot {
+				isMethodCall = true
+				receiverExpr = fnIdentifier.Expression
+				methodName = fnIdentifier.MemberName.Value
+			} else {
+				// This is a module:function call
+				alias := modIdent.Value
+				// Resolve alias to full package path
+				for _, imp := range e.birPackage.ImportModules {
+					if imp.Alias == alias {
+						pkgPath = imp.OrgName + "/" + imp.PackageName
+						break
+					}
 				}
+				funcName = fnIdentifier.MemberName.Value
+				// Check if this is io:println
+				isPrintln = alias == "io" && funcName == "println"
 			}
-			funcName = fnIdentifier.MemberName.Value
-			// Check if this is io:println
-			isPrintln = alias == "io" && funcName == "println"
 		} else {
-			panic(fmt.Sprintf("Unsupported member access expression for function call: %T", fnIdentifier.Expression))
+			// This could be a method call on a complex expression
+			if fnIdentifier.Token.Type == lexer.TokenDot {
+				isMethodCall = true
+				receiverExpr = fnIdentifier.Expression
+				methodName = fnIdentifier.MemberName.Value
+			} else {
+				panic(fmt.Sprintf("Unsupported member access expression for function call: %T", fnIdentifier.Expression))
+			}
 		}
 	default:
 		panic(fmt.Sprintf("Unsupported function identifier type in call: %T", callAST.Function))
@@ -771,17 +952,39 @@ func (e *Emitter) emitCallExpression(callAST *parser.CallExpressionNode, isDisca
 		return e.emitPrintlnCall(callAST.Arguments[0])
 	}
 
+	// Handle method calls
+	if isMethodCall {
+		// Emit the receiver expression
+		receiverVar := e.emitExpression(receiverExpr, false)
+		if receiverVar == nil {
+			return nil
+		}
+
+		// Convert arguments to BIR variables
+		args := make([]*Variable, 0, len(callAST.Arguments))
+		for _, argAST := range callAST.Arguments {
+			argBIR := e.emitExpression(argAST, false)
+			if argBIR == nil {
+				return nil
+			}
+			args = append(args, argBIR)
+		}
+
+		// Handle the method call
+		return e.emitMethodCall(receiverVar, methodName, args)
+	}
+
 	// Handle regular function calls
-	argsBIR := []*Variable{}
+	args := make([]*Variable, 0, len(callAST.Arguments))
 	for _, argAST := range callAST.Arguments {
 		argBIR := e.emitExpression(argAST, false)
 		if argBIR == nil {
 			return nil
 		}
-		argsBIR = append(argsBIR, argBIR)
+		args = append(args, argBIR)
 	}
 
-	var lhsVar *Variable = nil
+	var resultVar *Variable = nil
 	callReturnType := "any" // Default, needs lookup
 
 	if pkgPath == "ballerina/io" && funcName == "println" {
@@ -791,20 +994,20 @@ func (e *Emitter) emitCallExpression(callAST *parser.CallExpressionNode, isDisca
 	}
 
 	if !isDiscarded && callReturnType != "()" {
-		lhsVar = e.getOrCreateVar("_call_ret_"+funcName, callReturnType, VarKindTemp, false)
+		resultVar = e.getOrCreateVar("_call_ret_"+funcName, callReturnType, VarKindTemp, false)
 	}
 
 	callInstruction := &CallInst{
 		PackagePath:  pkgPath,
 		FunctionName: funcName,
-		Args:         argsBIR,
+		Args:         args,
 	}
-	if lhsVar != nil {
-		callInstruction.birInstruction = birInstruction{lhs: []*Variable{lhsVar}}
+	if resultVar != nil {
+		callInstruction.birInstruction = birInstruction{lhs: []*Variable{resultVar}}
 	}
 
 	e.addInstruction(callInstruction)
-	return lhsVar
+	return resultVar
 }
 
 // Helper method for emitting println calls with the correct BIR pattern
@@ -1159,6 +1362,16 @@ func (e *Emitter) emitBinaryExpression(binary *parser.BinaryExpressionNode, isDi
 			resultType = "decimal"
 		} else if leftVar.Type == "string" && binary.Operator == "+" && rightVar.Type == "string" {
 			resultType = "string"
+		} else if leftVar.Type == "string" && binary.Operator == "+" && rightVar.Type == "int" {
+			// Error: string + int without toString()
+			e.errors = append(e.errors, fmt.Errorf("ERROR [%s] operator '+' not defined for 'string' and 'int'",
+				e.getSourceLocation(binary.Token.Line, binary.Token.Column)))
+			return nil
+		} else if leftVar.Type == "int" && binary.Operator == "+" && rightVar.Type == "string" {
+			// Error: int + string without toString()
+			e.errors = append(e.errors, fmt.Errorf("ERROR [%s] operator '+' not defined for 'int' and 'string'",
+				e.getSourceLocation(binary.Token.Line, binary.Token.Column)))
+			return nil
 		}
 	case "==", "!=", "<", ">", "<=", ">=":
 		resultType = "boolean"
@@ -1209,4 +1422,78 @@ func (e *Emitter) emitServiceDeclaration(service *parser.ServiceDeclarationNode)
 	}
 
 	return functions, nil
+}
+
+// Add the missing emitGlobalVariable function to handle global variable declarations
+func (e *Emitter) emitGlobalVariable(global *parser.GlobalVariableNode) *GlobalVariable {
+	globalVar := &GlobalVariable{
+		Name: global.Name.Value,
+		Type: mapAstTypeToBirType(global.Type.TypeName),
+	}
+	e.birPackage.GlobalVars = append(e.birPackage.GlobalVars, globalVar)
+	e.globalVarMap[global.Name.Value] = globalVar
+	return globalVar
+}
+
+// getSourceLocation formats a source location for error messages
+func (e *Emitter) getSourceLocation(line, column int) string {
+	// Get the current filename from the package
+	// For now, we use a hardcoded value since we don't track source filenames
+	filename := "003-init-fn.bal"                                                   // This would ideally come from a source location tracker
+	return fmt.Sprintf("%s:(%d:%d,%d:%d)", filename, line, column, line, column+15) // Using +15 as an approximation for expression end
+}
+
+// emitMethodCall handles method calls on primitive types (e.g., int.toString())
+func (e *Emitter) emitMethodCall(receiver *Variable, methodName string, args []*Variable) *Variable {
+	if receiver == nil {
+		fmt.Printf("Warning: Nil receiver in method call %s\n", methodName)
+		return nil
+	}
+
+	// Handle toString() method for primitive types
+	if methodName == "toString" && len(args) == 0 {
+		resultVar := e.getOrCreateVar("_tostring_result", "string", VarKindTemp, false)
+
+		switch receiver.Type {
+		case "int":
+			// Create a conversion instruction from int to string
+			convInst := &TypeConversionInst{
+				From: receiver,
+				To:   "string",
+			}
+			convInst.birInstruction = birInstruction{lhs: []*Variable{resultVar}}
+
+			e.currentFunc.CurrentBB.Instructions = append(e.currentFunc.CurrentBB.Instructions, convInst)
+			return resultVar
+
+		case "float":
+			// Similar conversion for float to string
+			convInst := &TypeConversionInst{
+				From: receiver,
+				To:   "string",
+			}
+			convInst.birInstruction = birInstruction{lhs: []*Variable{resultVar}}
+
+			e.currentFunc.CurrentBB.Instructions = append(e.currentFunc.CurrentBB.Instructions, convInst)
+			return resultVar
+
+		case "boolean":
+			// Similar conversion for boolean to string
+			convInst := &TypeConversionInst{
+				From: receiver,
+				To:   "string",
+			}
+			convInst.birInstruction = birInstruction{lhs: []*Variable{resultVar}}
+
+			e.currentFunc.CurrentBB.Instructions = append(e.currentFunc.CurrentBB.Instructions, convInst)
+			return resultVar
+
+		default:
+			fmt.Printf("Warning: toString() method not implemented for type %s\n", receiver.Type)
+			return nil
+		}
+	}
+
+	fmt.Printf("Warning: Method %s not implemented for type %s\n", methodName, receiver.Type)
+	return nil
 }

@@ -177,6 +177,19 @@ func (cg *CodeGenerator) generateAllFunctions() {
 		// This depends on how BIR represents resource functions.
 	}
 
+	// If we have a user-defined init function, ensure it's generated
+	if cg.birPackage.ActualInitFunc != nil {
+		// The init function should already be in the functions map,
+		// but let's verify and log if it's missing
+		if _, ok := cg.functions[cg.birPackage.ActualInitFunc.Name]; !ok {
+			fmt.Printf("[WARNING] User-defined init function '%s' not found in functions map\n",
+				cg.birPackage.ActualInitFunc.Name)
+		} else {
+			fmt.Printf("[DEBUG] User-defined init function '%s' successfully generated\n",
+				cg.birPackage.ActualInitFunc.Name)
+		}
+	}
+
 	// Now create the ballerina_main function that will be called from C
 	mainFunc := cg.module.NewFunc("ballerina_main", types.Void)
 
@@ -355,6 +368,13 @@ func (cg *CodeGenerator) birTypeToLLVMType(birType string) types.Type {
 		return types.I1
 	case "()":
 		return types.Void
+	case "error?":
+		// Handle error? type for init function - can return either error or nil
+		if t, ok := cg.structTypes["BallerinaError"]; ok {
+			return types.NewPointer(t)
+		}
+		// Fallback
+		return types.I8Ptr
 	case "map":
 		if t, ok := cg.structTypes["BallerinaMap"]; ok {
 			return types.NewPointer(t)

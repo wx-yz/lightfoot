@@ -1,7 +1,10 @@
 // parser/ast.go
 package parser
 
-import "wx-yz/lightfoot/lexer"
+import (
+	"strings"
+	"wx-yz/lightfoot/lexer"
+)
 
 // Node is the interface for all AST nodes.
 type Node interface {
@@ -61,6 +64,19 @@ func (fdn *FunctionDefinitionNode) TokenLiteral() string    { return fdn.Token.L
 func (fdn *FunctionDefinitionNode) String() string          { return "FunctionDefinition: " + fdn.Name.Value }
 func (fdn *FunctionDefinitionNode) statementNode()          {}
 func (fdn *FunctionDefinitionNode) StartToken() lexer.Token { return fdn.Token }
+
+// InitFunctionNode represents an init function declaration.
+// init functions have specific constraints: no public visibility, no parameters, return type must be error? or ()
+type InitFunctionNode struct {
+	Token      lexer.Token
+	ReturnType *TypeNode           // Must be error? or ()
+	Body       *BlockStatementNode // Function body
+}
+
+func (ifn *InitFunctionNode) TokenLiteral() string    { return ifn.Token.Literal }
+func (ifn *InitFunctionNode) String() string          { return "InitFunction" }
+func (ifn *InitFunctionNode) statementNode()          {}
+func (ifn *InitFunctionNode) StartToken() lexer.Token { return ifn.Token }
 
 // ServiceDeclarationNode represents a service declaration.
 // e.g., service / on new http:Listener(9090) { ... }
@@ -286,3 +302,31 @@ func (aen *AssignmentExpressionNode) String() string {
 }
 func (aen *AssignmentExpressionNode) expressionNode()         {}
 func (aen *AssignmentExpressionNode) StartToken() lexer.Token { return aen.Target.StartToken() } // Or aen.Token (=), target is better for error source
+
+// GlobalVariableNode represents a global variable declaration.
+type GlobalVariableNode struct {
+	Token       lexer.Token
+	Name        *IdentifierNode
+	Type        *TypeNode
+	IsFinal     bool       // whether the variable is declared with 'final'
+	Initializer Expression // optional
+}
+
+func (g *GlobalVariableNode) TokenLiteral() string { return g.Token.Literal }
+func (g *GlobalVariableNode) String() string {
+	var sb strings.Builder
+	if g.IsFinal {
+		sb.WriteString("final ")
+	}
+	sb.WriteString(g.Type.TypeName)
+	sb.WriteString(" ")
+	sb.WriteString(g.Name.Value)
+	if g.Initializer != nil {
+		sb.WriteString(" = ")
+		sb.WriteString(g.Initializer.String())
+	}
+	sb.WriteString(";")
+	return sb.String()
+}
+func (g *GlobalVariableNode) StartToken() lexer.Token { return g.Token }
+func (g *GlobalVariableNode) statementNode()          {}

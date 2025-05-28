@@ -36,6 +36,7 @@ const (
 	TokenGreaterThan        // >
 	TokenGreaterThanOrEqual // >=
 	TokenDot                // .
+	TokenQuestionMark       // ?
 
 	// Keywords
 	keywordStart
@@ -53,6 +54,8 @@ const (
 	TokenKwResource // for resource functions
 	TokenKwOn       // for service attachment (service / on new http:Listener())
 	TokenKwNew      // for new object creation
+	TokenKwInit     // for init functions
+	TokenKwFinal    // for final keyword
 	keywordEnd
 )
 
@@ -109,6 +112,8 @@ func (t TokenType) String() string {
 		return "GreaterThanOrEqual"
 	case TokenDot:
 		return "Dot"
+	case TokenQuestionMark:
+		return "QuestionMark"
 	case TokenKwImport:
 		return "KwImport"
 	case TokenKwFunction:
@@ -137,6 +142,10 @@ func (t TokenType) String() string {
 		return "KwOn"
 	case TokenKwNew:
 		return "KwNew"
+	case TokenKwInit:
+		return "KwInit"
+	case TokenKwFinal:
+		return "KwFinal"
 	default:
 		return fmt.Sprintf("UnknownToken(%d)", t)
 	}
@@ -177,6 +186,8 @@ var keywords = map[string]TokenType{
 	"resource": TokenKwResource,
 	"on":       TokenKwOn,
 	"new":      TokenKwNew,
+	"init":     TokenKwInit,
+	"final":    TokenKwFinal,
 }
 
 // NewLexer creates a new Lexer.
@@ -350,6 +361,10 @@ func (l *Lexer) Lex() ([]Token, error) {
 		case '*':
 			tok.Type = TokenAsterisk
 			tok.Literal = "*"
+			l.readChar()
+		case '?':
+			tok.Type = TokenQuestionMark
+			tok.Literal = "?"
 			l.readChar()
 		case '/':
 			// Check for single line comment again (handled in skipWhitespace, but good for robustness)
