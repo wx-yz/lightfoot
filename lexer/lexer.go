@@ -3,6 +3,7 @@ package lexer
 
 import (
 	"fmt"
+	"strings" // Ensure strings is imported
 	"unicode"
 	"unicode/utf8"
 )
@@ -15,6 +16,7 @@ const (
 	TokenError
 	TokenIdentifier         // main, x, println
 	TokenIntLiteral         // 123, 0, 99
+	TokenFloatLiteral       // 1.23, 0.5, 99.99f
 	TokenStringLiteral      // "hello"
 	TokenBooleanLiteral     // true, false
 	TokenSemicolon          // ;
@@ -45,6 +47,7 @@ const (
 	TokenKwPublic
 	TokenKwReturn
 	TokenKwInt
+	TokenKwFloat
 	TokenKwBoolean
 	TokenKwstring // Note: string is a predefined type, not a strict keyword in all contexts, but treated as such for simplicity
 	TokenKwIf
@@ -56,6 +59,7 @@ const (
 	TokenKwNew      // for new object creation
 	TokenKwInit     // for init functions
 	TokenKwFinal    // for final keyword
+	TokenKwIs       // for 'is' keyword
 	keywordEnd
 )
 
@@ -70,6 +74,8 @@ func (t TokenType) String() string {
 		return "Identifier"
 	case TokenIntLiteral:
 		return "IntLiteral"
+	case TokenFloatLiteral:
+		return "FloatLiteral"
 	case TokenStringLiteral:
 		return "StringLiteral"
 	case TokenBooleanLiteral:
@@ -124,6 +130,8 @@ func (t TokenType) String() string {
 		return "KwReturn"
 	case TokenKwInt:
 		return "KwInt"
+	case TokenKwFloat:
+		return "KwFloat"
 	case TokenKwBoolean:
 		return "KwBoolean"
 	case TokenKwstring:
@@ -146,6 +154,8 @@ func (t TokenType) String() string {
 		return "KwInit"
 	case TokenKwFinal:
 		return "KwFinal"
+	case TokenKwIs:
+		return "KwIs"
 	default:
 		return fmt.Sprintf("UnknownToken(%d)", t)
 	}
@@ -175,6 +185,7 @@ var keywords = map[string]TokenType{
 	"public":   TokenKwPublic,
 	"return":   TokenKwReturn,
 	"int":      TokenKwInt,
+	"float":    TokenKwFloat,
 	"boolean":  TokenKwBoolean,
 	"string":   TokenKwstring,
 	"if":       TokenKwIf,
@@ -188,6 +199,7 @@ var keywords = map[string]TokenType{
 	"new":      TokenKwNew,
 	"init":     TokenKwInit,
 	"final":    TokenKwFinal,
+	"is":       TokenKwIs,
 }
 
 // NewLexer creates a new Lexer.
@@ -268,10 +280,31 @@ func (l *Lexer) readIdentifier() string {
 
 func (l *Lexer) readNumber() string {
 	startPos := l.pos
+	// Read initial digits
 	for isDigit(l.char) {
 		l.readChar()
 	}
-	return l.source[startPos:l.pos]
+
+	// Check for decimal point followed by digits
+	if l.char == '.' && isDigit(l.peekChar()) {
+		l.readChar() // consume the decimal point
+		for isDigit(l.char) {
+			l.readChar()
+		}
+	}
+
+	// Check for float suffix 'f' or 'F'
+	// This can appear after digits (e.g., 123f) or after a decimal part (e.g., 1.23f)
+	if l.char == 'f' || l.char == 'F' {
+		// Check if the character before 'f'/'F' was a digit or a decimal point
+		// to ensure it's a valid float suffix and not part of an identifier.
+		// This check is simplified; a more robust check might be needed if identifiers can contain 'f' or 'F'.
+		// For now, we assume if readNumber is called, it's in a number context.
+		l.readChar() // consume the suffix
+	}
+
+	numberStr := l.source[startPos:l.pos]
+	return numberStr
 }
 
 func (l *Lexer) readString() (string, error) {
@@ -450,9 +483,15 @@ func (l *Lexer) Lex() ([]Token, error) {
 					tok.Type = TokenIdentifier
 					tok.Literal = ident
 				}
-			} else if isDigit(l.char) {
-				tok.Type = TokenIntLiteral
-				tok.Literal = l.readNumber()
+			} else if isDigit(l.char) || (l.char == '.' && isDigit(l.peekChar())) { // Modified condition
+				numberStr := l.readNumber()
+				// Determine if this is an int or float based on the literal
+				if strings.ContainsAny(numberStr, ".fF") {
+					tok.Type = TokenFloatLiteral
+				} else {
+					tok.Type = TokenIntLiteral
+				}
+				tok.Literal = numberStr
 			} else {
 				tok.Type = TokenError
 				tok.Literal = string(l.char)

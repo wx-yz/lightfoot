@@ -2,7 +2,7 @@
 package parser
 
 import (
-	"fmt"
+	"fmt" // Ensure fmt is imported
 	"strconv"
 	"strings"
 	"wx-yz/lightfoot/lexer"
@@ -38,6 +38,7 @@ var precedences = map[lexer.TokenType]int{
 	lexer.TokenLParen:             Call,
 	lexer.TokenColon:              MemberAccess,
 	lexer.TokenDot:                MemberAccess,
+	lexer.TokenKwIs:               Equals, // or another appropriate precedence
 }
 
 type Parser struct {
@@ -63,11 +64,13 @@ func NewParser(tokens []lexer.Token) *Parser {
 	p.prefixParseFns = make(map[lexer.TokenType]prefixParseFn)
 	p.registerPrefix(lexer.TokenIdentifier, p.parseIdentifier)
 	p.registerPrefix(lexer.TokenIntLiteral, p.parseIntegerLiteral)
+	p.registerPrefix(lexer.TokenFloatLiteral, p.parseFloatLiteral) // Added
 	p.registerPrefix(lexer.TokenStringLiteral, p.parseStringLiteral)
 	p.registerPrefix(lexer.TokenBooleanLiteral, p.parseBooleanLiteral)
 	p.registerPrefix(lexer.TokenLParen, p.parseGroupedExpression)
-	p.registerPrefix(lexer.TokenSlash, p.parseSlashLiteral)  // Add support for / as service path
-	p.registerPrefix(lexer.TokenKwNew, p.parseNewExpression) // Add support for new expressions
+	p.registerPrefix(lexer.TokenSlash, p.parseSlashLiteral)          // Add support for / as service path
+	p.registerPrefix(lexer.TokenKwNew, p.parseNewExpression)         // Add support for new expressions
+	p.registerPrefix(lexer.TokenLessThan, p.parseTypeCastExpression) // Added for <float>n
 
 	p.infixParseFns = make(map[lexer.TokenType]infixParseFn)
 	p.registerInfix(lexer.TokenEqual, p.parseAssignmentExpression)
@@ -84,6 +87,7 @@ func NewParser(tokens []lexer.Token) *Parser {
 	p.registerInfix(lexer.TokenLParen, p.parseCallExpression)
 	p.registerInfix(lexer.TokenColon, p.parseMemberAccessExpression)
 	p.registerInfix(lexer.TokenDot, p.parseMemberAccessExpression)
+	p.registerInfix(lexer.TokenKwIs, p.parseIsExpression)
 
 	return p
 }
@@ -165,12 +169,14 @@ func (p *Parser) currentPrecedence() int {
 // ParseFile is the entry point for parsing a Ballerina file.
 // MODIFIED to correctly populate fileNode.Imports
 func (p *Parser) ParseFile() (*FileNode, error) {
+	fmt.Printf("DEBUG: ParseFile started\n")
 	fileNode := &FileNode{Token: p.currentToken()}
 	// Initialize slices to prevent nil pointer issues if file is empty
 	fileNode.Imports = []*ImportNode{}
 	fileNode.Definitions = []Node{}
 
 	for p.currentToken().Type != lexer.TokenEOF {
+		fmt.Printf("DEBUG: ParseFile processing token: %s (%s)\n", p.currentToken().Literal, p.currentToken().Type)
 		initialPos := p.pos
 		currentTokenForSwitch := p.currentToken()
 		parsedSuccessfully := true // Assume success unless a parse function returns nil
@@ -216,7 +222,7 @@ func (p *Parser) ParseFile() (*FileNode, error) {
 				parsedSuccessfully = false // parseServiceDeclaration failed
 			}
 		// Check for global variables
-		case lexer.TokenKwInt, lexer.TokenKwstring, lexer.TokenKwBoolean, lexer.TokenKwFinal:
+		case lexer.TokenKwInt, lexer.TokenKwFloat, lexer.TokenKwstring, lexer.TokenKwBoolean, lexer.TokenKwFinal:
 			// Parse global variable declaration
 			globalVar := p.parseGlobalVariable()
 			if globalVar != nil {
@@ -256,6 +262,7 @@ func (p *Parser) ParseFile() (*FileNode, error) {
 		}
 		return nil, fmt.Errorf(errorBuilder.String())
 	}
+	fmt.Printf("DEBUG: ParseFile completed successfully\n")
 	return fileNode, nil
 }
 
@@ -351,6 +358,34 @@ func (p *Parser) parseIntegerLiteral() Expression {
 	return &IntegerLiteralNode{Token: tok, Value: val}
 }
 
+func (p *Parser) parseFloatLiteral() Expression {
+	fmt.Printf("DEBUG: parseFloatLiteral called with token: %s (%s)\n", p.currentToken().Literal, p.currentToken().Type)
+	tok := p.currentToken() // Store current token before advancing
+	lit := &FloatLiteralNode{Token: tok}
+
+	// Pre-process the literal to remove 'f' or 'F' suffix if present
+	// This is a workaround for the lexer including it. Ideally, lexer provides clean literal.
+	floatStr := tok.Literal
+	if strings.HasSuffix(floatStr, "f") || strings.HasSuffix(floatStr, "F") {
+		floatStr = floatStr[:len(floatStr)-1]
+	}
+
+	value, err := strconv.ParseFloat(floatStr, 64)
+	if err != nil {
+		msg := fmt.Sprintf("line %d, col %d: could not parse %q as float (original: %q)",
+			tok.Line, tok.Column, floatStr, tok.Literal)
+		p.errors = append(p.errors, msg)
+		p.nextToken() // CONSUME THE PROBLEMATIC TOKEN!
+		fmt.Printf("DEBUG: parseFloatLiteral error, advancing token\n")
+		return nil
+	}
+
+	lit.Value = value
+	p.nextToken() // Consume the (now successfully parsed) token
+	fmt.Printf("DEBUG: parseFloatLiteral success, token consumed\n")
+	return lit
+}
+
 func (p *Parser) parseStringLiteral() Expression {
 	tok := p.currentToken()
 	if tok.Type != lexer.TokenStringLiteral {
@@ -428,6 +463,15 @@ func (p *Parser) parseGroupedExpression() Expression {
 	}
 	p.nextToken() // Consume LParen
 
+	// Check for type cast like (<float>)n
+	if p.isTypeToken(p.currentToken()) && p.peekToken().Type == lexer.TokenRParen {
+		// This is a type cast expression like (<float>)n
+		// We need to backtrack and parse it as a type cast expression
+		// For now, let's assume this specific syntax (<type>)expr is handled by parseTypeCastExpression
+		// by registering '<' as a prefix operator.
+		// This specific path for `(<type>)` might need a dedicated prefix function if it becomes ambiguous.
+	}
+
 	exp := p.parseExpression(Lowest)
 	if exp == nil {
 		if p.currentToken().Type != lexer.TokenRParen {
@@ -439,6 +483,57 @@ func (p *Parser) parseGroupedExpression() Expression {
 		return nil
 	}
 	return exp
+}
+
+func (p *Parser) parseTypeCastExpression() Expression {
+	startToken := p.currentToken() // Should be '<'
+
+	if startToken.Type != lexer.TokenLessThan {
+		p.errorExpectedToken(lexer.TokenLessThan, startToken)
+		return nil
+	}
+	p.nextToken() // Consume '<'
+
+	targetType := p.parseType()
+	if targetType == nil {
+		p.errorUnexpectedToken("expected type name in cast expression", p.currentToken())
+		return nil
+	}
+
+	if !p.expectToken(lexer.TokenGreaterThan) {
+		// Error already logged by expectToken
+		return nil
+	}
+
+	// Now parse the expression to be casted
+	// The precedence here should be high enough to bind tightly to the expression following the cast.
+	// Using a precedence like 'Prefix' or 'Call' might be appropriate.
+	expressionToCast := p.parseExpression(Prefix) // Using Prefix precedence
+	if expressionToCast == nil {
+		p.errorUnexpectedToken("expected expression after type cast", p.currentToken())
+		return nil
+	}
+
+	return &TypeCastExpressionNode{
+		Token:      startToken, // The '<' token
+		TargetType: targetType,
+		Expression: expressionToCast,
+	}
+}
+
+// Helper function to check if a token is a type keyword
+func (p *Parser) isTypeToken(tok lexer.Token) bool {
+	switch tok.Type {
+	case lexer.TokenKwInt, lexer.TokenKwFloat, lexer.TokenKwBoolean, lexer.TokenKwstring:
+		return true
+	default:
+		// Could also include TokenIdentifier if we support custom types more broadly here
+		return false
+	}
+}
+
+func isTypeToken(t lexer.TokenType) bool {
+	return t == lexer.TokenKwInt || t == lexer.TokenKwFloat || t == lexer.TokenKwBoolean // add others as needed
 }
 
 func (p *Parser) parseInfixExpression(left Expression) Expression {
@@ -533,6 +628,20 @@ func (p *Parser) parseMemberAccessExpression(left Expression) Expression {
 		Expression: left,
 		MemberName: memberName,
 	}
+}
+
+func (p *Parser) parseIsExpression(left Expression) Expression {
+	expr := &IsExpressionNode{
+		Token: p.currentToken(),
+		Left:  left,
+	}
+	p.nextToken() // move to the type keyword (e.g., float)
+	if !isTypeToken(p.currentToken().Type) {
+		p.errors = append(p.errors, fmt.Sprintf("expected type after 'is', got %s", p.currentToken().Literal))
+		return nil
+	}
+	expr.Type = p.parseType()
+	return expr
 }
 
 func (p *Parser) parseExpressionList(endToken lexer.TokenType) []Expression {
@@ -804,26 +913,41 @@ func (p *Parser) parseParameter() *ParameterNode {
 }
 
 func (p *Parser) parseType() *TypeNode {
-	switch p.currentToken().Type {
-	case lexer.TokenKwInt, lexer.TokenKwstring, lexer.TokenKwBoolean:
-		typeName := p.currentToken().Literal
-		p.nextToken() // Consume the type name
-		return &TypeNode{Token: p.tokens[p.pos-1], TypeName: typeName}
-	case lexer.TokenIdentifier:
-		typeName := p.currentToken().Literal
-		p.nextToken() // Consume the type name
+	token := p.currentToken()
+	var typeName string
+	var isArray bool = false // Keep for potential future use, but not parsing [] syntax here
+	var isNilable bool = false
 
-		// Handle optional type with question mark (e.g., error?)
-		if p.currentToken().Type == lexer.TokenQuestionMark {
-			typeName += "?"
-			p.nextToken() // Consume the question mark
-		}
-
-		return &TypeNode{Token: p.tokens[p.pos-1], TypeName: typeName}
+	switch token.Type {
+	case lexer.TokenKwInt:
+		typeName = "int"
+	case lexer.TokenKwFloat:
+		typeName = "float"
+	case lexer.TokenKwBoolean:
+		typeName = "boolean"
+	case lexer.TokenKwstring:
+		typeName = "string"
+	case lexer.TokenIdentifier: // For complex types like http:Listener or user-defined types
+		// This could be a simple type or a qualified type like foo:Bar
+		// For now, assume it's a simple identifier representing the type name.
+		// More complex type parsing (qualified, generic, etc.) would go here.
+		typeName = token.Literal
 	default:
-		p.errorUnexpectedToken("expected type", p.currentToken())
+		p.errorUnexpectedToken(fmt.Sprintf("expected type name, got %s", token.Type), token)
 		return nil
 	}
+	p.nextToken() // Consume the type token
+
+	// Check for nilable operator '?'
+	if p.currentToken().Type == lexer.TokenQuestionMark {
+		isNilable = true
+		p.nextToken() // Consume '?'
+	}
+
+	// NOTE: Array type parsing (e.g., int[]) is not handled here yet.
+	// If it were, we would check for lexer.TokenLBracket here.
+
+	return &TypeNode{Token: token, TypeName: typeName, IsArray: isArray, IsNilable: isNilable}
 }
 
 func (p *Parser) parseBlockStatement() *BlockStatementNode {
@@ -854,25 +978,18 @@ func (p *Parser) parseBlockStatement() *BlockStatementNode {
 }
 
 func (p *Parser) parseStatement() Statement {
-	var stmt Statement
-	currentStatementStartToken := p.currentToken()
-	switch currentStatementStartToken.Type {
-	case lexer.TokenKwInt, lexer.TokenKwstring, lexer.TokenKwBoolean, lexer.TokenKwVar:
-		stmt = p.parseVariableDeclarationStatement()
+	switch p.currentToken().Type {
+	case lexer.TokenKwVar, lexer.TokenKwFloat, lexer.TokenKwInt, lexer.TokenKwBoolean:
+		return p.parseVariableDeclarationStatement()
 	case lexer.TokenKwReturn:
-		stmt = p.parseReturnStatement()
+		return p.parseReturnStatement()
 	case lexer.TokenKwIf:
-		stmt = p.parseIfStatement()
+		return p.parseIfStatement() // Ensure this advances the token
+	// ...other cases like while, for, etc. as needed...
 	default:
-		if p.prefixParseFns[currentStatementStartToken.Type] != nil {
-			stmt = p.parseExpressionStatement()
-		} else {
-			p.errorUnexpectedToken("expected statement", currentStatementStartToken)
-			p.nextToken()
-			return nil
-		}
+		// Instead of just advancing the token, try to parse as an expression statement
+		return p.parseExpressionStatement()
 	}
-	return stmt
 }
 
 func (p *Parser) parseVariableDeclarationStatement() *VariableDeclarationNode {

@@ -272,15 +272,22 @@ func (i *NewArrayInst) String() string {
 // TypeConversionInst represents a type conversion instruction
 type TypeConversionInst struct {
 	birInstruction
-	From *Variable
-	To   string
+	LHSVar     *Variable // Renamed from lhs to avoid embedding conflict and be clear
+	SourceVar  *Variable // Renamed from From
+	TargetType string    // Renamed from To
+	IsCheck    bool      // For type checks like `x is float`
 }
 
 func (tc *TypeConversionInst) String() string {
-	if len(tc.lhs) > 0 {
-		return fmt.Sprintf("%s = <string> %s", tc.lhs[0].BIRName, tc.From.BIRName)
+	if tc.IsCheck {
+		return fmt.Sprintf("%s = %s is %s", tc.LHSVar.BIRName, tc.SourceVar.BIRName, tc.TargetType)
 	}
-	return fmt.Sprintf("<string> %s", tc.From.BIRName)
+	return fmt.Sprintf("%s = <%s> %s", tc.LHSVar.BIRName, tc.TargetType, tc.SourceVar.BIRName)
+}
+
+// Overriding GetLHS for TypeConversionInst
+func (tc *TypeConversionInst) GetLHS() []*Variable {
+	return []*Variable{tc.LHSVar}
 }
 
 // --- BIR Emitter ---
@@ -299,6 +306,38 @@ func NewEmitter() *Emitter {
 	return &Emitter{
 		globalVarMap: make(map[string]*GlobalVariable),
 		errors:       make([]error, 0),
+	}
+}
+
+// Helper function to map AST TypeNode to BIR type string
+func (e *Emitter) mapAstTypeToBirType(astTypeNode *parser.TypeNode) string {
+	if astTypeNode == nil {
+		return "any" // Or handle error
+	}
+	// This is a simplified mapping. A real implementation would handle qualified types,
+	// arrays, nilable types, etc., more robustly.
+	switch astTypeNode.TypeName {
+	case "int":
+		return "int"
+	case "float":
+		return "float"
+	case "boolean":
+		return "boolean"
+	case "string":
+		return "string"
+	case "error":
+		// Handle nilable error type error?
+		if astTypeNode.IsNilable {
+			return "error?" // Or a more specific BIR representation if available
+		}
+		return "error"
+	default:
+		// For unknown or complex types, might return the name directly or a generic type
+		// For now, let's assume it's a direct mapping or a placeholder.
+		if astTypeNode.IsNilable {
+			return astTypeNode.TypeName + "?"
+		}
+		return astTypeNode.TypeName // e.g., for custom types or complex ones like http:Listener
 	}
 }
 
@@ -340,6 +379,7 @@ func (e *Emitter) addInstruction(inst Instruction) {
 		// Optionally, create a new "unreachable" BB, but this masks the underlying issue.
 		// For now, allow adding, but it's a sign of trouble.
 	}
+	fmt.Printf("[DEBUG] Adding instruction to %s: %s\n", e.currentFunc.CurrentBB.ID, inst.String())
 	e.currentFunc.CurrentBB.Instructions = append(e.currentFunc.CurrentBB.Instructions, inst)
 }
 
@@ -626,6 +666,8 @@ func (e *Emitter) Emit(fileNode *parser.FileNode) (*Package, error) {
 				return nil, fmt.Errorf("failed to emit function %s: %w", node.Name.Value, err)
 			}
 			e.birPackage.Functions = append(e.birPackage.Functions, fnBir)
+			fmt.Printf("[DEBUG] Added function '%s' to BIR package (now has %d functions, %d basic blocks)\n",
+				fnBir.Name, len(e.birPackage.Functions), len(fnBir.BasicBlocks))
 
 		case *parser.ServiceDeclarationNode:
 			// Handle service declarations by converting resource functions to BIR functions
@@ -738,6 +780,16 @@ func (e *Emitter) emitFunctionDefinition(fdn *parser.FunctionDefinitionNode) (*F
 	entryBB := e.newBBCurrentFunc() // bb0
 	e.setCurrentBB(entryBB)
 
+	fmt.Printf("[DEBUG] Function %s: checking special case - params:%d, return:%s, body_statements:%d\n",
+		fdn.Name.Value, len(fdn.Parameters), returnTypeStr,
+		func() int {
+			if fdn.Body != nil {
+				return len(fdn.Body.Statements)
+			} else {
+				return 0
+			}
+		}())
+
 	// Special handling for main function with hardcoded "Hello, World!" demo
 	if fdn.Name.Value == "main" && len(fdn.Parameters) == 0 && returnTypeStr == "()" &&
 		fdn.Body != nil && len(fdn.Body.Statements) == 1 {
@@ -764,7 +816,13 @@ func (e *Emitter) emitFunctionDefinition(fdn *parser.FunctionDefinitionNode) (*F
 
 	// Default behavior for all other functions (including more complex main)
 	if fdn.Body != nil {
+		fmt.Printf("[DEBUG] Processing function body with emitBlockStatement\n")
+		fmt.Printf("[DEBUG] Current BB before emitBlockStatement: %v (has %d instructions)\n",
+			e.currentFunc.CurrentBB.ID, len(e.currentFunc.CurrentBB.Instructions))
 		e.emitBlockStatement(fdn.Body, nil)
+		fmt.Printf("[DEBUG] Current BB after emitBlockStatement: %v (has %d instructions)\n",
+			e.currentFunc.CurrentBB.ID, len(e.currentFunc.CurrentBB.Instructions))
+		fmt.Printf("[DEBUG] Total basic blocks in function: %d\n", len(e.currentFunc.BasicBlocks))
 	}
 
 	// Ensure function ends with a terminator if not already set by its body
@@ -793,6 +851,20 @@ func (e *Emitter) emitFunctionDefinition(fdn *parser.FunctionDefinitionNode) (*F
 	}
 
 	fnToReturn := e.currentFunc
+
+	// Debug: Print final BIR function state
+	fmt.Printf("[DEBUG] Final BIR function state for '%s':\n", fnToReturn.Name)
+	fmt.Printf("[DEBUG] - Total basic blocks: %d\n", len(fnToReturn.BasicBlocks))
+	for i, bb := range fnToReturn.BasicBlocks {
+		fmt.Printf("[DEBUG] - Block %d (%s): %d instructions\n", i, bb.ID, len(bb.Instructions))
+		for j, inst := range bb.Instructions {
+			fmt.Printf("[DEBUG]   - Inst %d: %s\n", j, inst.String())
+		}
+		if bb.Terminator != nil {
+			fmt.Printf("[DEBUG]   - Terminator: %s\n", bb.Terminator.String())
+		}
+	}
+
 	e.currentFunc = nil // Clear currentFunc after processing
 	return fnToReturn, nil
 }
@@ -897,6 +969,7 @@ func (e *Emitter) emitHelloWorldMain() (*Function, error) {
 
 // Update emitCallExpression to handle io:println calls consistently
 func (e *Emitter) emitCallExpression(callAST *parser.CallExpressionNode, isDiscarded bool) *Variable {
+	fmt.Printf("DEBUG: emitCallExpression for func %T, args: %d, isDiscarded: %t\n", callAST.Function, len(callAST.Arguments), isDiscarded)
 	var pkgPath, funcName string
 
 	// Determine if this is an io:println call
@@ -1012,6 +1085,7 @@ func (e *Emitter) emitCallExpression(callAST *parser.CallExpressionNode, isDisca
 
 // Helper method for emitting println calls with the correct BIR pattern
 func (e *Emitter) emitPrintlnCall(argument parser.Expression) *Variable {
+	fmt.Printf("DEBUG: emitPrintlnCall for argument type %T\n", argument)
 	// Create necessary variables
 	intVar := e.getOrCreateVar("_const_int_neg1", "int", VarKindTemp, false)
 	printableType := "ballerina/io:1.8.0:Printable"
@@ -1167,14 +1241,16 @@ func (e *Emitter) emitBlockStatement(block *parser.BlockStatementNode, loopConte
 	if block == nil || len(block.Statements) == 0 {
 		return
 	}
-
-	for _, stmt := range block.Statements {
+	fmt.Printf("DEBUG: emitBlockStatement - %d statements\n", len(block.Statements))
+	for i, stmt := range block.Statements {
+		fmt.Printf("DEBUG: emitBlockStatement - processing statement %d/%d of type %T\n", i+1, len(block.Statements), stmt)
 		e.emitStatement(stmt, loopContext)
 	}
 }
 
 // Update the emitStatement function to use AssignmentExpressionNode
 func (e *Emitter) emitStatement(stmt parser.Statement, loopContext interface{}) {
+	fmt.Printf("DEBUG: emitStatement for type %T\n", stmt)
 	switch s := stmt.(type) {
 	case *parser.ExpressionStatementNode:
 		// Expression used as a statement (e.g., function calls)
@@ -1201,6 +1277,7 @@ func (e *Emitter) emitStatement(stmt parser.Statement, loopContext interface{}) 
 
 // Update the emitExpression function to handle expressions
 func (e *Emitter) emitExpression(expr parser.Expression, isDiscarded bool) *Variable {
+	fmt.Printf("DEBUG: emitExpression for type %T, isDiscarded: %t, expr: %+v\n", expr, isDiscarded, expr)
 	switch ex := expr.(type) {
 	case *parser.IntegerLiteralNode:
 		if isDiscarded {
@@ -1211,6 +1288,18 @@ func (e *Emitter) emitExpression(expr parser.Expression, isDiscarded bool) *Vari
 			birInstruction: birInstruction{lhs: []*Variable{tempVar}},
 			Value:          ex.Value,
 			TypeName:       "int",
+		})
+		return tempVar
+
+	case *parser.FloatLiteralNode:
+		if isDiscarded {
+			return nil
+		}
+		tempVar := e.getOrCreateVar("", "float", VarKindTemp, false)
+		e.addInstruction(&ConstantLoadInst{
+			birInstruction: birInstruction{lhs: []*Variable{tempVar}},
+			Value:          ex.Value,
+			TypeName:       "float",
 		})
 		return tempVar
 
@@ -1243,13 +1332,71 @@ func (e *Emitter) emitExpression(expr parser.Expression, isDiscarded bool) *Vari
 			return nil
 		}
 		// Look up identifiers in the current scope
-		return e.findVarByOriginalName(ex.Value)
+		v := e.findVarByOriginalName(ex.Value)
+		if v != nil {
+			return v
+		}
+		// Fallback: check if it's a global variable
+		for _, g := range e.birPackage.GlobalVars {
+			if g.Name == ex.Value {
+				return &Variable{
+					BIRName:      g.Name,
+					Type:         g.Type,
+					Kind:         VarKindGlobalRef,
+					OriginalName: g.Name,
+				}
+			}
+		}
+		fmt.Printf("Warning: Identifier '%s' not found as local or global\n", ex.Value)
+		return nil
 
 	case *parser.CallExpressionNode:
+		// Special case: int.toString()
+		if memberAccess, ok := ex.Function.(*parser.MemberAccessExpressionNode); ok {
+			receiver := memberAccess.Expression
+			if memberAccess.MemberName.Value == "toString" {
+				receiverVar := e.emitExpression(receiver, false)
+				if receiverVar != nil && receiverVar.Type == "int" {
+					resultVar := e.getOrCreateVar("_int_to_string", "string", VarKindTemp, false)
+					e.addInstruction(&CallInst{
+						birInstruction: birInstruction{lhs: []*Variable{resultVar}},
+						PackagePath:    "ballerina/lang.int",
+						FunctionName:   "toString",
+						Args:           []*Variable{receiverVar},
+					})
+					return resultVar
+				}
+			}
+		}
 		return e.emitCallExpression(ex, isDiscarded)
+
+	case *parser.AssignmentExpressionNode:
+		// Support assignment expressions (e.g., value = 2, name = "James")
+		e.emitAssignmentStatement(ex)
+		return nil
 
 	case *parser.BinaryExpressionNode:
 		return e.emitBinaryExpression(ex, isDiscarded)
+
+	case *parser.TypeCastExpressionNode:
+		targetBirType := e.mapAstTypeToBirType(ex.TargetType) // Ensure this calls the Emitter's method
+		exprToCastVar := e.emitExpression(ex.Expression, false)
+		if exprToCastVar == nil {
+			e.errors = append(e.errors, fmt.Errorf("failed to emit expression for type cast at line %d, col %d", ex.StartToken().Line, ex.StartToken().Column))
+			return nil
+		}
+
+		// Create a new temporary variable for the result of the cast
+		resultVar := e.getOrCreateVar("", targetBirType, VarKindTemp, false)
+
+		// Emit the TypeConversionInst
+		e.addInstruction(&TypeConversionInst{
+			LHSVar:     resultVar,
+			SourceVar:  exprToCastVar,
+			TargetType: targetBirType,
+			IsCheck:    false, // This is a cast, not a type check
+		})
+		return resultVar
 
 	case *parser.MemberAccessExpressionNode:
 		// Handle member access (object.field, module.func, etc.)
@@ -1286,20 +1433,30 @@ func (e *Emitter) emitVariableDeclaration(decl *parser.VariableDeclarationNode) 
 
 // Update the emitAssignmentStatement function
 func (e *Emitter) emitAssignmentStatement(assign *parser.AssignmentExpressionNode) {
-	// Get the target variable
+	// Get the target variable (local or global)
 	var targetVar *Variable
-
 	switch target := assign.Target.(type) {
 	case *parser.IdentifierNode:
-		// Simple variable assignment
 		targetVar = e.findVarByOriginalName(target.Value)
+		if targetVar == nil {
+			// Try global variable
+			for _, g := range e.birPackage.GlobalVars {
+				if g.Name == target.Value {
+					targetVar = &Variable{
+						BIRName:      g.Name,
+						Type:         g.Type,
+						Kind:         VarKindGlobalRef,
+						OriginalName: g.Name,
+					}
+					break
+				}
+			}
+		}
 		if targetVar == nil {
 			fmt.Printf("Error: Undefined variable '%s' in assignment\n", target.Value)
 			return
 		}
-
-	// Handle other assignment targets (e.g., member access) if needed
-
+	// TODO: handle MemberAccessExpressionNode for fields
 	default:
 		fmt.Printf("Warning: Unsupported assignment target type %T\n", assign.Target)
 		return
@@ -1337,20 +1494,32 @@ func (e *Emitter) emitReturnStatement(ret *parser.ReturnStatementNode) {
 
 // Add the emitBinaryExpression function
 func (e *Emitter) emitBinaryExpression(binary *parser.BinaryExpressionNode, isDiscarded bool) *Variable {
-	// Emit left and right expressions
+	fmt.Printf("DEBUG: emitBinaryExpression op '%s', Left: %T, Right: %T\n", binary.Operator, binary.Left, binary.Right)
 	leftVar := e.emitExpression(binary.Left, false)
 	rightVar := e.emitExpression(binary.Right, false)
 
 	if leftVar == nil || rightVar == nil {
+		fmt.Printf("DEBUG: emitBinaryExpression - leftVar or rightVar is nil\n")
 		return nil
 	}
 
 	if isDiscarded {
-		// If result is discarded (e.g., expression used as statement), skip creating result var
 		return nil
 	}
 
-	// Determine result type
+	// Handle string concatenation
+	if binary.Operator == "+" && leftVar.Type == "string" && rightVar.Type == "string" {
+		resultVar := e.getOrCreateVar("_str_concat_res", "string", VarKindTemp, false)
+		e.addInstruction(&CallInst{
+			birInstruction: birInstruction{lhs: []*Variable{resultVar}},
+			PackagePath:    "ballerina/lang.string",
+			FunctionName:   "concat",
+			Args:           []*Variable{leftVar, rightVar},
+		})
+		return resultVar
+	}
+
+	// Handle int/float comparisons and arithmetic
 	resultType := "any"
 	switch binary.Operator {
 	case "+", "-", "*", "/", "%":
@@ -1358,37 +1527,17 @@ func (e *Emitter) emitBinaryExpression(binary *parser.BinaryExpressionNode, isDi
 			resultType = "int"
 		} else if leftVar.Type == "float" || rightVar.Type == "float" {
 			resultType = "float"
-		} else if leftVar.Type == "decimal" || rightVar.Type == "decimal" {
-			resultType = "decimal"
-		} else if leftVar.Type == "string" && binary.Operator == "+" && rightVar.Type == "string" {
-			resultType = "string"
-		} else if leftVar.Type == "string" && binary.Operator == "+" && rightVar.Type == "int" {
-			// Error: string + int without toString()
-			e.errors = append(e.errors, fmt.Errorf("ERROR [%s] operator '+' not defined for 'string' and 'int'",
-				e.getSourceLocation(binary.Token.Line, binary.Token.Column)))
-			return nil
-		} else if leftVar.Type == "int" && binary.Operator == "+" && rightVar.Type == "string" {
-			// Error: int + string without toString()
-			e.errors = append(e.errors, fmt.Errorf("ERROR [%s] operator '+' not defined for 'int' and 'string'",
-				e.getSourceLocation(binary.Token.Line, binary.Token.Column)))
-			return nil
 		}
-	case "==", "!=", "<", ">", "<=", ">=":
-		resultType = "boolean"
-	case "&&", "||":
+	case ">", ">=", "<", "<=", "==", "!=":
 		resultType = "boolean"
 	}
-
 	resultVar := e.getOrCreateVar("_bin_op_res", resultType, VarKindTemp, false)
-
-	// Create the binary operation instruction
 	e.addInstruction(&BinaryOpInst{
 		birInstruction: birInstruction{lhs: []*Variable{resultVar}},
 		Op:             binary.Operator,
 		Op1:            leftVar,
 		Op2:            rightVar,
 	})
-
 	return resultVar
 }
 
@@ -1456,35 +1605,35 @@ func (e *Emitter) emitMethodCall(receiver *Variable, methodName string, args []*
 
 		switch receiver.Type {
 		case "int":
-			// Create a conversion instruction from int to string
-			convInst := &TypeConversionInst{
-				From: receiver,
-				To:   "string",
+			// Emit a call to the runtime int-to-string function, not a TypeConversionInst
+			callInst := &CallInst{
+				birInstruction: birInstruction{lhs: []*Variable{resultVar}},
+				PackagePath:    "ballerina/lang.int",
+				FunctionName:   "toString",
+				Args:           []*Variable{receiver},
 			}
-			convInst.birInstruction = birInstruction{lhs: []*Variable{resultVar}}
-
-			e.currentFunc.CurrentBB.Instructions = append(e.currentFunc.CurrentBB.Instructions, convInst)
+			e.currentFunc.CurrentBB.Instructions = append(e.currentFunc.CurrentBB.Instructions, callInst)
 			return resultVar
 
 		case "float":
-			// Similar conversion for float to string
+			// Similar conversion for float to string (could be a runtime call or conversion)
 			convInst := &TypeConversionInst{
-				From: receiver,
-				To:   "string",
+				LHSVar:     resultVar,
+				SourceVar:  receiver,
+				TargetType: "string",
+				IsCheck:    false,
 			}
-			convInst.birInstruction = birInstruction{lhs: []*Variable{resultVar}}
-
 			e.currentFunc.CurrentBB.Instructions = append(e.currentFunc.CurrentBB.Instructions, convInst)
 			return resultVar
 
 		case "boolean":
 			// Similar conversion for boolean to string
 			convInst := &TypeConversionInst{
-				From: receiver,
-				To:   "string",
+				LHSVar:     resultVar,
+				SourceVar:  receiver,
+				TargetType: "string",
+				IsCheck:    false,
 			}
-			convInst.birInstruction = birInstruction{lhs: []*Variable{resultVar}}
-
 			e.currentFunc.CurrentBB.Instructions = append(e.currentFunc.CurrentBB.Instructions, convInst)
 			return resultVar
 
@@ -1494,6 +1643,212 @@ func (e *Emitter) emitMethodCall(receiver *Variable, methodName string, args []*
 		}
 	}
 
-	fmt.Printf("Warning: Method %s not implemented for type %s\n", methodName, receiver.Type)
+	// Fallback: not a recognized primitive method call
+	fmt.Printf("Warning: emitMethodCall fallback for method %s on type %s\n", methodName, receiver.Type)
 	return nil
+}
+
+// GenerateFromAST converts an AST to a BIR package.
+// The astNode parameter should be a *parser.FileNode.
+func GenerateFromAST(astNode interface{}) (*Package, error) {
+	fileNode, ok := astNode.(*parser.FileNode)
+	if !ok {
+		return nil, fmt.Errorf("expected *parser.FileNode, got %T", astNode)
+	}
+
+	fmt.Println("[INFO] Generating BIR from AST")
+
+	// Create a new package
+	pkg := &Package{
+		Name:          "main", // Default name for the main package
+		Functions:     make([]*Function, 0),
+		GlobalVars:    make([]*GlobalVariable, 0),
+		ImportModules: make([]*ImportModule, 0),
+	}
+
+	// Process imports
+	for _, importNode := range fileNode.Imports {
+		importModule := &ImportModule{
+			PackageName: importNode.PackageName,
+			OrgName:     importNode.OrgName,
+			Alias:       importNode.Alias,
+		}
+		pkg.ImportModules = append(pkg.ImportModules, importModule)
+		fmt.Printf("[DEBUG] Added import: %s\n", importNode.PackageName)
+	}
+
+	// Process top-level definitions
+	for _, def := range fileNode.Definitions {
+		switch node := def.(type) {
+		case *parser.FunctionDefinitionNode:
+			// Regular function
+			function := processFunction(node)
+			pkg.Functions = append(pkg.Functions, function)
+			fmt.Printf("[DEBUG] Added function: %s\n", function.Name)
+
+			// Check if it's the main function
+			if function.Name == "main" && node.Visibility == "public" {
+				fmt.Println("[DEBUG] Found public main function")
+			}
+
+		case *parser.InitFunctionNode:
+			// Init function
+			function := processInitFunction(node)
+			pkg.Functions = append(pkg.Functions, function)
+			pkg.ActualInitFunc = function // Store reference to init function
+			fmt.Println("[DEBUG] Found init function")
+
+		case *parser.VariableDeclarationNode:
+			// Global variable
+			globalVar := &GlobalVariable{
+				Name: node.Name.String(),
+				Type: node.Type.String(),
+			}
+			pkg.GlobalVars = append(pkg.GlobalVars, globalVar)
+			fmt.Printf("[DEBUG] Added global variable: %s (%s)\n", globalVar.Name, globalVar.Type)
+
+		case *parser.GlobalVariableNode:
+			// Global variable (alternate syntax)
+			globalVar := &GlobalVariable{
+				Name: node.Name.String(),
+				Type: node.Type.String(),
+			}
+			pkg.GlobalVars = append(pkg.GlobalVars, globalVar)
+			fmt.Printf("[DEBUG] Added global variable: %s (%s)\n", globalVar.Name, globalVar.Type)
+
+		default:
+			fmt.Printf("[WARNING] Unhandled definition type: %T\n", node)
+		}
+	}
+
+	fmt.Printf("[DEBUG] BIR package has %d functions and %d global variables\n",
+		len(pkg.Functions), len(pkg.GlobalVars))
+
+	return pkg, nil
+}
+
+// Helper function to process a function definition
+func processFunction(node *parser.FunctionDefinitionNode) *Function {
+	function := &Function{
+		Name:        node.Name.String(),
+		Visibility:  node.Visibility,
+		Parameters:  make([]*Variable, 0),
+		LocalVars:   make(map[string]*Variable),
+		BasicBlocks: make([]*BasicBlock, 0),
+		nextVarID:   0,
+		nextBBID:    0,
+	}
+
+	// Process parameters
+	for i, param := range node.Parameters {
+		variable := &Variable{
+			Name:          param.Name.String(),
+			BIRName:       fmt.Sprintf("%%arg%d", i),
+			Type:          param.Type.String(),
+			Kind:          VarKindArg,
+			IsFunctionArg: true,
+			OriginalName:  param.Name.String(),
+		}
+		function.Parameters = append(function.Parameters, variable)
+		function.LocalVars[variable.BIRName] = variable
+	}
+
+	// Process return type
+	if node.ReturnType != nil {
+		returnVar := &Variable{
+			Name:         "return",
+			BIRName:      "%0", // Convention: return variable is %0
+			Type:         node.ReturnType.String(),
+			Kind:         VarKindReturn,
+			OriginalName: "return",
+		}
+		function.ReturnVariable = returnVar
+		function.LocalVars[returnVar.BIRName] = returnVar
+	} else {
+		// Default return type is nil/void
+		returnVar := &Variable{
+			Name:         "return",
+			BIRName:      "%0",
+			Type:         "nil",
+			Kind:         VarKindReturn,
+			OriginalName: "return",
+		}
+		function.ReturnVariable = returnVar
+		function.LocalVars[returnVar.BIRName] = returnVar
+	}
+
+	// Create a basic block for the function body
+	if node.Body != nil {
+		entryBB := &BasicBlock{
+			ID:           "BB0",
+			Instructions: make([]Instruction, 0),
+		}
+		function.BasicBlocks = append(function.BasicBlocks, entryBB)
+		function.CurrentBB = entryBB
+
+		// For simplicity, we're not processing the actual statements in the body
+		// In a real implementation, you would traverse the statements and generate
+		// BIR instructions
+
+		// Add a return instruction as terminator for the basic block
+		entryBB.Terminator = &ReturnInst{}
+	}
+
+	return function
+}
+
+// Helper function to process an init function
+func processInitFunction(node *parser.InitFunctionNode) *Function {
+	function := &Function{
+		Name:        "init",
+		Visibility:  "",                   // init functions are not public
+		Parameters:  make([]*Variable, 0), // init functions have no parameters
+		LocalVars:   make(map[string]*Variable),
+		BasicBlocks: make([]*BasicBlock, 0),
+		nextVarID:   0,
+		nextBBID:    0,
+	}
+
+	// Process return type
+	if node.ReturnType != nil {
+		returnVar := &Variable{
+			Name:         "return",
+			BIRName:      "%0",
+			Type:         node.ReturnType.String(),
+			Kind:         VarKindReturn,
+			OriginalName: "return",
+		}
+		function.ReturnVariable = returnVar
+		function.LocalVars[returnVar.BIRName] = returnVar
+	} else {
+		// Default return type for init is error?
+		returnVar := &Variable{
+			Name:         "return",
+			BIRName:      "%0",
+			Type:         "error?",
+			Kind:         VarKindReturn,
+			OriginalName: "return",
+		}
+		function.ReturnVariable = returnVar
+		function.LocalVars[returnVar.BIRName] = returnVar
+	}
+
+	// Create a basic block for the function body
+	if node.Body != nil {
+		entryBB := &BasicBlock{
+			ID:           "BB0",
+			Instructions: make([]Instruction, 0),
+		}
+		function.BasicBlocks = append(function.BasicBlocks, entryBB)
+		function.CurrentBB = entryBB
+
+		// For simplicity, we're not processing the actual statements in the body
+		// In a real implementation, you would traverse the statements and generate
+		// BIR instructions
+
+		// Add a return instruction as terminator for the basic block
+		entryBB.Terminator = &ReturnInst{}
+	}
+
+	return function
 }

@@ -10,17 +10,11 @@ import (
 // MockLinkObjectFile creates a mock executable that simulates
 // the execution of a compiled Ballerina program with init function support
 func MockLinkObjectFile(objectFile, executableFile string) error {
-	// Create a shell script that simulates the execution of the compiled program
+	// Create a shell script that prints an error - we shouldn't be using this anymore
 	script := `#!/bin/sh
-echo "Starting initialization..."
-# Simulate setting a module variable in init
-echo "Set name to: James"
-# Simulate successful init completion
-echo "Initialization complete"
-# Simulate main function running
-echo "Main function executing"
-echo "Value: 2"
-echo "Name: James"
+echo "ERROR: Mock linker used instead of real backend!"
+echo "The real backend should generate proper initialization and main execution."
+exit 1
 `
 
 	// Write the script to the output file

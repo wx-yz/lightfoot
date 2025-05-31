@@ -228,6 +228,17 @@ func (iln *IntegerLiteralNode) String() string          { return iln.Token.Liter
 func (iln *IntegerLiteralNode) expressionNode()         {}
 func (iln *IntegerLiteralNode) StartToken() lexer.Token { return iln.Token }
 
+// FloatLiteralNode represents a float literal.
+type FloatLiteralNode struct {
+	Token lexer.Token
+	Value float64
+}
+
+func (fln *FloatLiteralNode) TokenLiteral() string    { return fln.Token.Literal }
+func (fln *FloatLiteralNode) String() string          { return fln.Token.Literal }
+func (fln *FloatLiteralNode) expressionNode()         {}
+func (fln *FloatLiteralNode) StartToken() lexer.Token { return fln.Token }
+
 // StringLiteralNode represents a string literal.
 type StringLiteralNode struct {
 	Token lexer.Token
@@ -303,6 +314,20 @@ func (aen *AssignmentExpressionNode) String() string {
 func (aen *AssignmentExpressionNode) expressionNode()         {}
 func (aen *AssignmentExpressionNode) StartToken() lexer.Token { return aen.Target.StartToken() } // Or aen.Token (=), target is better for error source
 
+// TypeCastExpressionNode represents a type cast expression e.g. <float>myInt
+type TypeCastExpressionNode struct {
+	Token      lexer.Token // The '<' token
+	TargetType *TypeNode
+	Expression Expression
+}
+
+func (tcen *TypeCastExpressionNode) TokenLiteral() string { return tcen.Token.Literal }
+func (tcen *TypeCastExpressionNode) String() string {
+	return "<" + tcen.TargetType.String() + ">" + tcen.Expression.String()
+}
+func (tcen *TypeCastExpressionNode) expressionNode()         {}
+func (tcen *TypeCastExpressionNode) StartToken() lexer.Token { return tcen.Token }
+
 // GlobalVariableNode represents a global variable declaration.
 type GlobalVariableNode struct {
 	Token       lexer.Token
@@ -330,3 +355,17 @@ func (g *GlobalVariableNode) String() string {
 }
 func (g *GlobalVariableNode) StartToken() lexer.Token { return g.Token }
 func (g *GlobalVariableNode) statementNode()          {}
+
+// IsExpressionNode represents an 'is' expression.
+type IsExpressionNode struct {
+	Token lexer.Token // The 'is' token
+	Left  Expression
+	Type  *TypeNode
+}
+
+func (n *IsExpressionNode) TokenLiteral() string { return n.Token.Literal }
+func (n *IsExpressionNode) String() string {
+	return n.Left.String() + " is " + n.Type.String()
+}
+func (n *IsExpressionNode) expressionNode()         {}
+func (n *IsExpressionNode) StartToken() lexer.Token { return n.Token }

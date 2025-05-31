@@ -4,194 +4,86 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"wx-yz/lightfoot/backend"
-	"wx-yz/lightfoot/bir"
-	"wx-yz/lightfoot/compiler"
+	"wx-yz/lightfoot/bir"   // Assuming this package exists and is structured as expected
+	"wx-yz/lightfoot/lexer" // Assuming a lexer package
+	"wx-yz/lightfoot/parser"
 )
-
-func printFunctionBIR(fn *bir.Function) {
-	// For .<init> function, use special return type signature
-	returnType := fn.ReturnVariable.Type
-	if fn.Name == ".<init>" {
-		returnType = "error{map<ballerina/lang.value:0.0.0:Cloneable>}|()"
-	}
-
-	fmt.Printf("\n%s %s function(", strings.ToLower(fn.Visibility), fn.Name)
-	paramStrings := []string{}
-	for _, p := range fn.Parameters {
-		paramStrings = append(paramStrings, p.Type)
-	}
-	fmt.Printf("%s) -> %s {\n", strings.Join(paramStrings, ", "), returnType)
-
-	printedVars := make(map[string]bool)
-
-	// Print Return Var
-	if fn.ReturnVariable != nil {
-		fmt.Printf("    %s(%s) %s;\n", fn.ReturnVariable.BIRName, fn.ReturnVariable.Kind, fn.ReturnVariable.Type)
-		printedVars[fn.ReturnVariable.BIRName] = true
-	}
-	// Print Arg Vars
-	for _, v := range fn.ArgumentVars {
-		if !printedVars[v.BIRName] {
-			fmt.Printf("    %s(%s) %s; // original: %s\n", v.BIRName, v.Kind, v.Type, v.OriginalName)
-			printedVars[v.BIRName] = true
-		}
-	}
-	// Print other Local/Temp vars
-	for birName, v := range fn.LocalVars {
-		if !printedVars[birName] {
-			if v.Kind != bir.VarKindArg && v.Kind != bir.VarKindReturn {
-				fmt.Printf("    %s(%s) %s; // original: %s\n", v.BIRName, v.Kind, v.Type, v.OriginalName)
-				printedVars[v.BIRName] = true
-			}
-		}
-	}
-
-	fmt.Println() // Blank line before basic blocks
-
-	for _, bb := range fn.BasicBlocks {
-		fmt.Printf("    %s {\n", bb.ID)
-		for _, instr := range bb.Instructions {
-			fmt.Printf("        %s;\n", instr.String())
-		}
-		if bb.Terminator != nil {
-			fmt.Printf("        %s;\n", bb.Terminator.String())
-		} else {
-			fmt.Printf("        // Error: BB %s has no terminator\n", bb.ID)
-		}
-		fmt.Printf("    }\n")
-	}
-	fmt.Printf("}\n")
-}
 
 func main() {
 	// Parse command line arguments
 	inputFile := flag.String("input", "", "Input Ballerina source file")
-	outputFile := flag.String("output", "", "Output object file")
-	execFile := flag.String("exec", "", "Output executable file")
-	showBIR := flag.Bool("show-bir", true, "Show BIR output") // Default to true for debugging
-	noLink := flag.Bool("no-link", false, "Don't link into executable")
 	flag.Parse()
 
 	if *inputFile == "" {
-		fmt.Println("Error: Input file is required")
-		flag.Usage()
-		os.Exit(1)
+		log.Fatal("Input file is required. Use --input=<filename>")
 	}
 
-	// Set default output file name if not specified
-	if *outputFile == "" {
-		*outputFile = strings.TrimSuffix(*inputFile, ".bal") + ".o"
-	}
-
-	// Set default executable name if not specified
-	if *execFile == "" {
-		// Remove extension and add platform-specific executable extension
-		base := strings.TrimSuffix(*inputFile, filepath.Ext(*inputFile))
-		if runtime.GOOS == "windows" {
-			*execFile = base + ".exe"
-		} else {
-			*execFile = base
-		}
-	}
-
-	// Read input file
-	input, err := os.ReadFile(*inputFile)
+	// Read the input Ballerina file
+	sourceCode, err := os.ReadFile(*inputFile)
 	if err != nil {
-		fmt.Printf("Error reading input file: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Failed to read input file %s: %v", *inputFile, err)
 	}
 
-	// Compile to BIR
-	birPackage, err := compiler.Compile(string(input))
+	// Lex the source code
+	lexer := lexer.NewLexer(string(sourceCode)) // Assuming lexer.NewLexer exists
+	tokens, lexErr := lexer.Lex()               // Assuming lexer.Lex() ([]lexer.Token, error) exists
+	if lexErr != nil {
+		log.Fatalf("Lexing failed: %v", lexErr)
+	}
+
+	// Parse the tokens
+	parser := parser.NewParser(tokens)  // Assuming parser.NewParser takes []lexer.Token
+	ast, parseErr := parser.ParseFile() // Changed to ParseFile()
+	if parseErr != nil {
+		log.Fatalf("Parsing failed: %v", parseErr)
+	}
+
+	// BIR Generation using the proper Emitter
+	birEmitter := bir.NewEmitter()
+	birPackage, birErr := birEmitter.Emit(ast)
+	if birErr != nil {
+		log.Fatalf("BIR generation failed: %v", birErr)
+	}
+
+	// Create a new code generator
+	codeGen := backend.NewCodeGenerator(birPackage) // birPackage would be the result of previous steps
+
+	// Generate LLVM IR
+	llvmIR, err := codeGen.Generate() // Assumes Generate() (string, error) exists in CodeGenerator
 	if err != nil {
-		fmt.Printf("Error compiling to BIR: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Failed to generate LLVM IR: %v", err)
 	}
 
-	// Show diagnostic information
-	fmt.Printf("Processing file: %s\n", *inputFile)
-	fmt.Printf("Input file size: %d bytes\n", len(input))
-	fmt.Printf("Compilation status: %v\n", birPackage != nil)
+	// Define output filenames
+	baseFilename := strings.TrimSuffix(*inputFile, filepath.Ext(*inputFile))
+	objectFile := baseFilename + ".o"
+	executableFile := baseFilename
 
-	// Show BIR if requested
-	if *showBIR {
-		fmt.Println("BIR Output:")
-		for _, fn := range birPackage.Functions {
-			printFunctionBIR(fn)
-		}
-		if birPackage.ModuleInitFunc != nil {
-			printFunctionBIR(birPackage.ModuleInitFunc)
-		}
-		if birPackage.ModuleStartFunc != nil {
-			printFunctionBIR(birPackage.ModuleStartFunc)
-		}
-		if birPackage.ModuleStopFunc != nil {
-			printFunctionBIR(birPackage.ModuleStopFunc)
-		}
+	// Write LLVM IR to a .ll file (optional, for debugging)
+	llFile := baseFilename + ".ll"
+	if err := os.WriteFile(llFile, []byte(llvmIR), 0644); err != nil {
+		log.Printf("Warning: Failed to write LLVM IR file %s: %v", llFile, err)
 	}
 
-	// Always run debug output
-	backend.DebugPrintln(birPackage)
+	// Compile LLVM IR (.ll file) to an object file (.o) using llc
+	llcCmd := exec.Command("llc", "-filetype=obj", "-o", objectFile, llFile)
+	llcOutput, err := llcCmd.CombinedOutput()
+	if err != nil {
+		log.Fatalf("llc compilation failed: %v\nOutput:\n%s", err, string(llcOutput))
+	}
+	fmt.Printf("llc compilation successful. Object file: %s\n", objectFile)
 
-	// Process println calls to ensure they're executed
-	backend.PrintlnHandler(birPackage)
-
-	// Generate native code
-	if !*showBIR { // Skip LLVM code generation if we're just showing BIR
-		// Skip backend code generation if we're encountering C source file errors
-		useFallback := false
-
-		// Try to generate code using backend
-		codeGen := backend.NewCodeGenerator(birPackage)
-		if err := codeGen.GenerateCode(*outputFile); err != nil {
-			fmt.Printf("Error generating code: %v\n", err)
-			fmt.Println("Using fallback method...")
-			useFallback = true
-		}
-
-		// Link object file into executable if requested
-		if !*noLink {
-			var err error
-			if !useFallback {
-				err = backend.MockLinkObjectFile(*outputFile, *execFile)
-			}
-
-			if useFallback || err != nil {
-				if err != nil {
-					fmt.Printf("Error linking executable: %v\n", err)
-					fmt.Println("Using fallback method...")
-				}
-
-				// Use the simplified fallback method
-				if err := backend.LinkExecutable(*execFile); err != nil {
-					fmt.Printf("Error with fallback linking: %v\n", err)
-					os.Exit(1)
-				}
-			}
-
-			fmt.Printf("Successfully generated executable: %s\n", *execFile)
-		}
+	// Link the object file with the runtime to create the executable
+	err = backend.LinkObjectFile(objectFile, executableFile)
+	if err != nil {
+		log.Fatalf("Linking failed: %v", err)
 	}
 
-	fmt.Printf("Successfully generated object file: %s\n", *outputFile)
-
-	// Link object file into executable if requested
-	if !*noLink {
-		if err := backend.MockLinkObjectFile(*outputFile, *execFile); err != nil {
-			fmt.Printf("Error linking executable: %v\n", err)
-			fmt.Println("Falling back to direct executable generation...")
-
-			// Try our alternative linking method as a fallback
-			if err := backend.LinkExecutable(*execFile); err != nil {
-				fmt.Printf("Error with fallback linking: %v\n", err)
-				os.Exit(1)
-			}
-		}
-		fmt.Printf("Successfully generated executable: %s\n", *execFile)
-	}
+	fmt.Printf("Compilation successful. Executable: %s\n", executableFile)
 }
