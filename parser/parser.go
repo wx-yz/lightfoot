@@ -1020,7 +1020,7 @@ func (p *Parser) parseBlockStatement() *BlockStatementNode {
 	for p.currentToken().Type != lexer.TokenRBrace && p.currentToken().Type != lexer.TokenEOF {
 		stmtStartToken := p.currentToken()
 		fmt.Printf("DEBUG: parseBlockStatement - parsing statement %d, current token: %s (%s) at pos %d\n", statementCount+1, stmtStartToken.Literal, stmtStartToken.Type, p.pos)
-		
+
 		stmt := p.parseStatement()
 		if stmt != nil {
 			fmt.Printf("DEBUG: parseBlockStatement - successfully parsed statement %d of type %T\n", statementCount+1, stmt)
@@ -1034,14 +1034,14 @@ func (p *Parser) parseBlockStatement() *BlockStatementNode {
 				fmt.Printf("DEBUG: parseBlockStatement - advanced token after error, now at: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 			}
 		}
-		
+
 		// Safety check to prevent infinite loops
 		if statementCount > 100 {
 			fmt.Printf("DEBUG: parseBlockStatement - too many statements, breaking to prevent infinite loop\n")
 			break
 		}
 	}
-	
+
 	fmt.Printf("DEBUG: parseBlockStatement - finished parsing statements, current token: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 	if !p.expectToken(lexer.TokenRBrace) {
 		fmt.Printf("DEBUG: parseBlockStatement - failed to find closing brace\n")

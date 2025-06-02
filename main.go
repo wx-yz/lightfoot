@@ -36,7 +36,7 @@ func main() {
 	if lexErr != nil {
 		log.Fatalf("Lexing failed: %v", lexErr)
 	}
-	
+
 	// Debug: Print all tokens
 	fmt.Printf("DEBUG: Generated %d tokens:\n", len(tokens))
 	for i, token := range tokens {
