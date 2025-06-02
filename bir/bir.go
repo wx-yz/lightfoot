@@ -694,6 +694,10 @@ func (e *Emitter) Emit(fileNode *parser.FileNode) (*Package, error) {
 			_ = e.emitGlobalVariable(node)
 			// Global variable is already added to the package in emitGlobalVariable
 
+		case *parser.VariableDeclarationNode:
+			// Handle module-level variable declarations
+			e.emitVariableDeclaration(node)
+
 		default:
 			// Ignore other node types
 		}
@@ -1021,8 +1025,8 @@ func (e *Emitter) emitCallExpression(callAST *parser.CallExpressionNode, isDisca
 	}
 
 	// For println calls, emit special instructions sequence
-	if isPrintln && len(callAST.Arguments) == 1 {
-		return e.emitPrintlnCall(callAST.Arguments[0])
+	if isPrintln {
+		return e.emitPrintlnCall(callAST.Arguments)
 	}
 
 	// Handle method calls
@@ -1084,18 +1088,98 @@ func (e *Emitter) emitCallExpression(callAST *parser.CallExpressionNode, isDisca
 }
 
 // Helper method for emitting println calls with the correct BIR pattern
-func (e *Emitter) emitPrintlnCall(argument parser.Expression) *Variable {
-	fmt.Printf("DEBUG: emitPrintlnCall for argument type %T\n", argument)
+func (e *Emitter) emitPrintlnCall(arguments []parser.Expression) *Variable {
+	fmt.Printf("DEBUG: emitPrintlnCall for %d arguments\n", len(arguments))
+
+	if len(arguments) == 1 {
+		// Single argument println - use existing logic
+		return e.emitSinglePrintlnCall(arguments[0])
+	}
+
+	// Multi-argument println - concatenate arguments with spaces
+	var resultVar *Variable
+
+	for i, arg := range arguments {
+		argVar := e.emitExpression(arg, false)
+		if argVar == nil {
+			continue
+		}
+
+		if i == 0 {
+			// First argument becomes the result
+			resultVar = argVar
+		} else {
+			// Add space before each subsequent argument
+			spaceVar := e.getOrCreateVar("_const_space", "string", VarKindTemp, false)
+			e.addInstruction(&ConstantLoadInst{
+				birInstruction: birInstruction{lhs: []*Variable{spaceVar}},
+				Value:          " ",
+				TypeName:       "string",
+			})
+
+			// Concatenate current result with space
+			tempVar1 := e.getOrCreateVar("_concat_temp", "string", VarKindTemp, false)
+			e.addInstruction(&CallInst{
+				birInstruction: birInstruction{lhs: []*Variable{tempVar1}},
+				PackagePath:    "ballerina/lang.string",
+				FunctionName:   "concat",
+				Args:           []*Variable{resultVar, spaceVar},
+			})
+
+			// Convert argument to string if needed
+			argStrVar := argVar
+			if argVar.Type != "string" {
+				argStrVar = e.getOrCreateVar("_arg_to_str", "string", VarKindTemp, false)
+				e.addInstruction(&TypeConversionInst{
+					LHSVar:     argStrVar,
+					SourceVar:  argVar,
+					TargetType: "string",
+					IsCheck:    false,
+				})
+			}
+
+			// Concatenate with argument
+			newResultVar := e.getOrCreateVar("_concat_result", "string", VarKindTemp, false)
+			e.addInstruction(&CallInst{
+				birInstruction: birInstruction{lhs: []*Variable{newResultVar}},
+				PackagePath:    "ballerina/lang.string",
+				FunctionName:   "concat",
+				Args:           []*Variable{tempVar1, argStrVar},
+			})
+
+			resultVar = newResultVar
+		}
+	}
+
+	if resultVar == nil {
+		return nil
+	}
+
+	// Now emit the actual println call with the concatenated result
+	return e.emitSinglePrintlnCall(nil, resultVar)
+}
+
+// Helper method for single argument println calls
+func (e *Emitter) emitSinglePrintlnCall(argument parser.Expression, argVar ...*Variable) *Variable {
+	var finalArgVar *Variable
+
+	if len(argVar) > 0 && argVar[0] != nil {
+		// Use provided variable
+		finalArgVar = argVar[0]
+	} else if argument != nil {
+		// Emit the expression
+		finalArgVar = e.emitExpression(argument, false)
+		if finalArgVar == nil {
+			return nil
+		}
+	} else {
+		return nil
+	}
+
 	// Create necessary variables
 	intVar := e.getOrCreateVar("_const_int_neg1", "int", VarKindTemp, false)
 	printableType := "ballerina/io:1.8.0:Printable"
 	arrayVar := e.getOrCreateVar("_array_for_println", "typeRefDesc<>[]", VarKindTemp, false)
-
-	// Get the argument value
-	argVar := e.emitExpression(argument, false)
-	if argVar == nil {
-		return nil
-	}
 
 	// Cast the argument to Printable (two casts as in target BIR)
 	varForCast1 := e.getOrCreateVar("_cast1_printable", printableType, VarKindTemp, false)
@@ -1112,7 +1196,7 @@ func (e *Emitter) emitPrintlnCall(argument parser.Expression) *Variable {
 	e.addInstruction(&TypeCastInst{
 		birInstruction: birInstruction{lhs: []*Variable{varForCast1}},
 		TargetType:     printableType,
-		SourceVar:      argVar,
+		SourceVar:      finalArgVar,
 	})
 
 	e.addInstruction(&TypeCastInst{
@@ -1411,23 +1495,64 @@ func (e *Emitter) emitExpression(expr parser.Expression, isDiscarded bool) *Vari
 	}
 }
 
-// Update emitVariableDeclaration to use InitialValue instead of Initializer
-func (e *Emitter) emitVariableDeclaration(decl *parser.VariableDeclarationNode) {
+// Add support for global variables with initializers
+func (e *Emitter) emitGlobalVariable(global *parser.GlobalVariableNode) *GlobalVariable {
+	globalVar := &GlobalVariable{
+		Name: global.Name.Value,
+		Type: mapAstTypeToBirType(global.Type.TypeName),
+	}
+	e.birPackage.GlobalVars = append(e.birPackage.GlobalVars, globalVar)
+	e.globalVarMap[global.Name.Value] = globalVar
+
+	// If there's an initializer, we need to add it to the module init function
+	if global.Initializer != nil {
+		// Store the global variable and its initializer for processing in module init
+		// This will be handled when we emit the module init function
+		fmt.Printf("[DEBUG] Global variable %s has initializer\n", global.Name.Value)
+	}
+
+	return globalVar
+}
+
+// Update emitVariableDeclaration to handle global and local variables properly
+func (e *Emitter) emitVariableDeclaration(vd *parser.VariableDeclarationNode) {
+	fmt.Printf("[DEBUG] Processing variable declaration: %s %s\n", vd.Type.TypeName, vd.Name.Value)
+
 	// Get the variable type from AST
-	varTypeStr := mapAstTypeToBirType(decl.Type.TypeName)
+	varTypeStr := mapAstTypeToBirType(vd.Type.TypeName)
 
-	// Create the variable in the current scope
-	localVar := e.getOrCreateVar(decl.Name.Value, varTypeStr, VarKindLocal, false)
-
-	// If there's an initializer expression, emit it and assign to the variable
-	if decl.InitialValue != nil {
-		initValue := e.emitExpression(decl.InitialValue, false)
-		if initValue != nil {
-			e.addInstruction(&MoveInst{
-				birInstruction: birInstruction{lhs: []*Variable{localVar}},
-				RHS:            initValue,
-			})
+	// Determine if we're at module level or function level
+	if e.currentFunc == nil {
+		// Module-level variable - create a global variable
+		globalVar := &GlobalVariable{
+			Name: vd.Name.Value,
+			Type: varTypeStr,
 		}
+		e.birPackage.GlobalVars = append(e.birPackage.GlobalVars, globalVar)
+		e.globalVarMap[vd.Name.Value] = globalVar
+
+		fmt.Printf("[DEBUG] Added global variable: %s of type %s\n", vd.Name.Value, varTypeStr)
+
+		// Store initializer for later processing in module init
+		if vd.InitialValue != nil {
+			fmt.Printf("[DEBUG] Global variable %s has initializer\n", vd.Name.Value)
+		}
+	} else {
+		// Function-level variable - create a local variable
+		localVar := e.getOrCreateVar(vd.Name.Value, varTypeStr, VarKindLocal, false)
+
+		// If there's an initializer expression, emit it and assign to the variable
+		if vd.InitialValue != nil {
+			initValue := e.emitExpression(vd.InitialValue, false)
+			if initValue != nil {
+				e.addInstruction(&MoveInst{
+					birInstruction: birInstruction{lhs: []*Variable{localVar}},
+					RHS:            initValue,
+				})
+			}
+		}
+
+		fmt.Printf("[DEBUG] Added local variable: %s of type %s\n", vd.Name.Value, varTypeStr)
 	}
 }
 
@@ -1571,17 +1696,6 @@ func (e *Emitter) emitServiceDeclaration(service *parser.ServiceDeclarationNode)
 	}
 
 	return functions, nil
-}
-
-// Add the missing emitGlobalVariable function to handle global variable declarations
-func (e *Emitter) emitGlobalVariable(global *parser.GlobalVariableNode) *GlobalVariable {
-	globalVar := &GlobalVariable{
-		Name: global.Name.Value,
-		Type: mapAstTypeToBirType(global.Type.TypeName),
-	}
-	e.birPackage.GlobalVars = append(e.birPackage.GlobalVars, globalVar)
-	e.globalVarMap[global.Name.Value] = globalVar
-	return globalVar
 }
 
 // getSourceLocation formats a source location for error messages

@@ -88,7 +88,6 @@ func (cg *CodeGenerator) Generate() (string, error) {
 		// Process each function in the BIR package
 		for _, birFunc := range cg.birPackage.Functions {
 			fmt.Printf("[DEBUG] Processing BIR function: %s\n", birFunc.Name)
-			fmt.Printf("[DEBUG] BACKEND RECEIVED: Function '%s' has %d basic blocks\n", birFunc.Name, len(birFunc.BasicBlocks))
 
 			// Create LLVM function from BIR function
 			llvmFunc := cg.generateFunction(birFunc)

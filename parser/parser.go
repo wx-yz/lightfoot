@@ -190,9 +190,11 @@ func (p *Parser) ParseFile() (*FileNode, error) {
 				parsedSuccessfully = false // parseImportStatement failed
 			}
 		case lexer.TokenKwPublic, lexer.TokenKwFunction:
+			fmt.Printf("DEBUG: ParseFile - handling public/function, checking if init function\n")
 			// Check if this is an init function
 			if currentTokenForSwitch.Type == lexer.TokenKwFunction &&
 				(p.peekToken().Type == lexer.TokenKwInit || p.peekToken().Literal == "init") {
+				fmt.Printf("DEBUG: ParseFile - detected init function\n")
 				initFn := p.parseInitFunction()
 				if initFn != nil {
 					fileNode.Definitions = append(fileNode.Definitions, initFn)
@@ -200,6 +202,7 @@ func (p *Parser) ParseFile() (*FileNode, error) {
 					parsedSuccessfully = false // parseInitFunction failed
 				}
 			} else {
+				fmt.Printf("DEBUG: ParseFile - parsing regular function definition\n")
 				fn := p.parseFunctionDefinition()
 				if fn != nil {
 					fileNode.Definitions = append(fileNode.Definitions, fn)
@@ -264,6 +267,41 @@ func (p *Parser) ParseFile() (*FileNode, error) {
 	}
 	fmt.Printf("DEBUG: ParseFile completed successfully\n")
 	return fileNode, nil
+}
+
+// Added support for top-level variable declarations
+func (p *Parser) parseDefinition() Node {
+	fmt.Printf("DEBUG: parseDefinition - current token: %s (%s)\n", p.currentToken().Type, p.currentToken().Literal)
+
+	switch p.currentToken().Type {
+	case lexer.TokenKwImport:
+		return p.parseImportStatement()
+	case lexer.TokenKwPublic:
+		// Check if this is a public function
+		if p.peekToken().Type == lexer.TokenKwFunction {
+			return p.parseFunctionDefinition()
+		}
+		// Handle other public declarations if needed
+		fmt.Printf("WARNING: Unhandled public declaration\n")
+		return nil
+	case lexer.TokenKwFunction:
+		return p.parseFunctionDefinition()
+	case lexer.TokenKwService:
+		return p.parseServiceDeclaration()
+	case lexer.TokenKwInit:
+		return p.parseInitFunction()
+
+	// Handle type keywords that start variable declarations
+	case lexer.TokenKwInt, lexer.TokenKwFloat, lexer.TokenKwBoolean, lexer.TokenKwstring:
+		fmt.Printf("DEBUG: parseDefinition - found type keyword, parsing global variable declaration\n")
+		return p.parseGlobalVariable()
+
+	default:
+		fmt.Printf("ERROR: parseDefinition - unexpected token: %s (%s)\n", p.currentToken().Type, p.currentToken().Literal)
+		// Try to recover by skipping the current token
+		p.nextToken()
+		return nil
+	}
 }
 
 // Pratt parser core logic for expressions
@@ -735,22 +773,27 @@ func (p *Parser) parseImportStatement() *ImportNode {
 }
 
 func (p *Parser) parseFunctionDefinition() *FunctionDefinitionNode {
+	fmt.Printf("DEBUG: parseFunctionDefinition - starting with token: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 	stmt := &FunctionDefinitionNode{Token: p.currentToken()}
 
 	if p.currentToken().Type == lexer.TokenKwPublic {
 		stmt.Visibility = "public"
 		p.nextToken()
+		fmt.Printf("DEBUG: parseFunctionDefinition - consumed 'public', now at: %s (%s)\n", p.currentToken().Literal, p.currentToken().Type)
 	} else {
 		stmt.Visibility = ""
 	}
 
 	if !p.expectToken(lexer.TokenKwFunction) {
+		fmt.Printf("DEBUG: parseFunctionDefinition - failed to find 'function' token\n")
 		return nil
 	}
+	fmt.Printf("DEBUG: parseFunctionDefinition - consumed 'function', now at: %s (%s)\n", p.currentToken().Literal, p.currentToken().Type)
 
 	nameToken := p.currentToken()
 	nameExpr := p.parseIdentifier()
 	if nameExpr == nil {
+		fmt.Printf("DEBUG: parseFunctionDefinition - parseIdentifier returned nil\n")
 		return nil
 	}
 	nameIdent, ok := nameExpr.(*IdentifierNode)
@@ -759,17 +802,24 @@ func (p *Parser) parseFunctionDefinition() *FunctionDefinitionNode {
 		return nil
 	}
 	stmt.Name = nameIdent
+	fmt.Printf("DEBUG: parseFunctionDefinition - function name parsed: %s\n", nameIdent.Value)
 
 	if !p.expectToken(lexer.TokenLParen) {
+		fmt.Printf("DEBUG: parseFunctionDefinition - failed to find '(' token\n")
 		return nil
 	}
+	fmt.Printf("DEBUG: parseFunctionDefinition - parsing parameters\n")
 	stmt.Parameters = p.parseFunctionParameters()
 	if stmt.Parameters == nil && len(p.errors) > 0 && p.currentToken().Type != lexer.TokenRParen {
+		fmt.Printf("DEBUG: parseFunctionDefinition - parseFunctionParameters failed\n")
 		return nil
 	}
+	fmt.Printf("DEBUG: parseFunctionDefinition - parameters parsed, expecting ')'\n")
 	if !p.expectToken(lexer.TokenRParen) {
+		fmt.Printf("DEBUG: parseFunctionDefinition - failed to find ')' token\n")
 		return nil
 	}
+	fmt.Printf("DEBUG: parseFunctionDefinition - parameters completed\n")
 
 	if p.currentToken().Literal == "returns" {
 		p.nextToken()
@@ -782,14 +832,17 @@ func (p *Parser) parseFunctionDefinition() *FunctionDefinitionNode {
 	}
 
 	bodyToken := p.currentToken()
+	fmt.Printf("DEBUG: parseFunctionDefinition - parsing body, current token: %s (%s)\n", bodyToken.Literal, bodyToken.Type)
 	if bodyToken.Type != lexer.TokenLBrace {
 		p.errorExpectedToken(lexer.TokenLBrace, bodyToken)
 		return nil
 	}
 	stmt.Body = p.parseBlockStatement()
 	if stmt.Body == nil {
+		fmt.Printf("DEBUG: parseFunctionDefinition - parseBlockStatement returned nil\n")
 		return nil
 	}
+	fmt.Printf("DEBUG: parseFunctionDefinition - function definition completed successfully\n")
 
 	return stmt
 }
@@ -914,6 +967,7 @@ func (p *Parser) parseParameter() *ParameterNode {
 
 func (p *Parser) parseType() *TypeNode {
 	token := p.currentToken()
+	fmt.Printf("DEBUG: parseType - current token: %s (%s) at pos %d\n", token.Literal, token.Type, p.pos)
 	var typeName string
 	var isArray bool = false // Keep for potential future use, but not parsing [] syntax here
 	var isNilable bool = false
@@ -937,6 +991,7 @@ func (p *Parser) parseType() *TypeNode {
 		return nil
 	}
 	p.nextToken() // Consume the type token
+	fmt.Printf("DEBUG: parseType - after consuming type token, now at: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 
 	// Check for nilable operator '?'
 	if p.currentToken().Type == lexer.TokenQuestionMark {
@@ -952,61 +1007,89 @@ func (p *Parser) parseType() *TypeNode {
 
 func (p *Parser) parseBlockStatement() *BlockStatementNode {
 	blockToken := p.currentToken()
+	fmt.Printf("DEBUG: parseBlockStatement - starting with token: %s (%s) at pos %d\n", blockToken.Literal, blockToken.Type, p.pos)
 	block := &BlockStatementNode{Token: blockToken}
 	if !p.expectToken(lexer.TokenLBrace) {
+		fmt.Printf("DEBUG: parseBlockStatement - failed to find opening brace\n")
 		return nil
 	}
+	fmt.Printf("DEBUG: parseBlockStatement - found opening brace, current token: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 
 	block.Statements = []Statement{}
+	statementCount := 0
 	for p.currentToken().Type != lexer.TokenRBrace && p.currentToken().Type != lexer.TokenEOF {
 		stmtStartToken := p.currentToken()
+		fmt.Printf("DEBUG: parseBlockStatement - parsing statement %d, current token: %s (%s) at pos %d\n", statementCount+1, stmtStartToken.Literal, stmtStartToken.Type, p.pos)
+		
 		stmt := p.parseStatement()
 		if stmt != nil {
+			fmt.Printf("DEBUG: parseBlockStatement - successfully parsed statement %d of type %T\n", statementCount+1, stmt)
 			block.Statements = append(block.Statements, stmt)
+			statementCount++
 		} else {
+			fmt.Printf("DEBUG: parseBlockStatement - failed to parse statement %d, current token: %s (%s) at pos %d\n", statementCount+1, p.currentToken().Literal, p.currentToken().Type, p.pos)
 			if p.currentToken() == stmtStartToken && p.currentToken().Type != lexer.TokenRBrace && p.currentToken().Type != lexer.TokenEOF {
 				p.errorUnexpectedToken("failed to parse statement or parser stuck in block", p.currentToken())
 				p.nextToken()
+				fmt.Printf("DEBUG: parseBlockStatement - advanced token after error, now at: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 			}
 		}
+		
+		// Safety check to prevent infinite loops
+		if statementCount > 100 {
+			fmt.Printf("DEBUG: parseBlockStatement - too many statements, breaking to prevent infinite loop\n")
+			break
+		}
 	}
-
+	
+	fmt.Printf("DEBUG: parseBlockStatement - finished parsing statements, current token: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 	if !p.expectToken(lexer.TokenRBrace) {
+		fmt.Printf("DEBUG: parseBlockStatement - failed to find closing brace\n")
 		return nil
 	}
+	fmt.Printf("DEBUG: parseBlockStatement - successfully completed with %d statements\n", len(block.Statements))
 	return block
 }
 
 func (p *Parser) parseStatement() Statement {
+	fmt.Printf("DEBUG: parseStatement - current token: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 	switch p.currentToken().Type {
-	case lexer.TokenKwVar, lexer.TokenKwFloat, lexer.TokenKwInt, lexer.TokenKwBoolean:
+	case lexer.TokenKwVar, lexer.TokenKwFloat, lexer.TokenKwInt, lexer.TokenKwBoolean, lexer.TokenKwstring:
+		fmt.Printf("DEBUG: parseStatement - detected variable declaration\n")
 		return p.parseVariableDeclarationStatement()
 	case lexer.TokenKwReturn:
+		fmt.Printf("DEBUG: parseStatement - detected return statement\n")
 		return p.parseReturnStatement()
 	case lexer.TokenKwIf:
+		fmt.Printf("DEBUG: parseStatement - detected if statement\n")
 		return p.parseIfStatement() // Ensure this advances the token
 	// ...other cases like while, for, etc. as needed...
 	default:
+		fmt.Printf("DEBUG: parseStatement - trying to parse as expression statement\n")
 		// Instead of just advancing the token, try to parse as an expression statement
 		return p.parseExpressionStatement()
 	}
 }
 
 func (p *Parser) parseVariableDeclarationStatement() *VariableDeclarationNode {
+	fmt.Printf("DEBUG: parseVariableDeclarationStatement - starting with token: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 	stmt := &VariableDeclarationNode{Token: p.currentToken()}
 
 	if p.currentToken().Type == lexer.TokenKwVar {
 		varToken := p.currentToken()
 		p.nextToken()
 		stmt.Type = &TypeNode{Token: varToken, TypeName: "var"}
+		fmt.Printf("DEBUG: parseVariableDeclarationStatement - parsed var type\n")
 	} else {
 		typeToken := p.currentToken()
+		fmt.Printf("DEBUG: parseVariableDeclarationStatement - parsing type: %s (%s)\n", typeToken.Literal, typeToken.Type)
 		parsedType := p.parseType()
 		if parsedType == nil {
 			p.errorUnexpectedToken("expected type name in variable declaration", typeToken)
 			return nil
 		}
 		stmt.Type = parsedType
+		fmt.Printf("DEBUG: parseVariableDeclarationStatement - type parsed successfully: %s\n", parsedType.TypeName)
 	}
 
 	nameToken := p.currentToken()
@@ -1261,6 +1344,7 @@ func (p *Parser) parseResourceFunction() *ResourceFunction {
 
 // parseGlobalVariable parses a global variable declaration.
 func (p *Parser) parseGlobalVariable() *GlobalVariableNode {
+	fmt.Printf("DEBUG: parseGlobalVariable - starting with token: %s (%s) at pos %d\n", p.currentToken().Literal, p.currentToken().Type, p.pos)
 	var node GlobalVariableNode
 
 	// Check if the variable is final
@@ -1273,13 +1357,17 @@ func (p *Parser) parseGlobalVariable() *GlobalVariableNode {
 	}
 
 	// Parse the type
+	fmt.Printf("DEBUG: parseGlobalVariable - parsing type...\n")
 	typeNode := p.parseType()
 	if typeNode == nil {
+		fmt.Printf("DEBUG: parseGlobalVariable - parseType returned nil\n")
 		return nil
 	}
 	node.Type = typeNode
+	fmt.Printf("DEBUG: parseGlobalVariable - type parsed successfully: %s\n", typeNode.TypeName)
 
 	// Parse the variable name
+	fmt.Printf("DEBUG: parseGlobalVariable - parsing variable name, current token: %s (%s)\n", p.currentToken().Literal, p.currentToken().Type)
 	if p.currentToken().Type != lexer.TokenIdentifier {
 		p.errors = append(p.errors, fmt.Sprintf("line %d, col %d: expected identifier, got %s",
 			p.currentToken().Line, p.currentToken().Column, p.currentToken().Type))
@@ -1287,24 +1375,32 @@ func (p *Parser) parseGlobalVariable() *GlobalVariableNode {
 	}
 	node.Name = &IdentifierNode{Token: p.currentToken(), Value: p.currentToken().Literal}
 	p.nextToken() // Consume identifier
+	fmt.Printf("DEBUG: parseGlobalVariable - variable name parsed: %s\n", node.Name.Value)
 
 	// Check for initializer
+	fmt.Printf("DEBUG: parseGlobalVariable - checking for initializer, current token: %s (%s)\n", p.currentToken().Literal, p.currentToken().Type)
 	if p.currentToken().Type == lexer.TokenEqual {
 		p.nextToken() // Consume '='
+		fmt.Printf("DEBUG: parseGlobalVariable - parsing initializer expression, current token: %s (%s)\n", p.currentToken().Literal, p.currentToken().Type)
 		initializer := p.parseExpression(Lowest)
 		if initializer == nil {
+			fmt.Printf("DEBUG: parseGlobalVariable - parseExpression returned nil\n")
 			return nil
 		}
 		node.Initializer = initializer
+		fmt.Printf("DEBUG: parseGlobalVariable - initializer parsed successfully\n")
 	}
 
 	// Expect semicolon
+	fmt.Printf("DEBUG: parseGlobalVariable - checking for semicolon, current token: %s (%s)\n", p.currentToken().Literal, p.currentToken().Type)
 	if p.currentToken().Type != lexer.TokenSemicolon {
 		p.errors = append(p.errors, fmt.Sprintf("line %d, col %d: expected semicolon, got %s",
 			p.currentToken().Line, p.currentToken().Column, p.currentToken().Type))
 		return nil
 	}
 	p.nextToken() // Consume ';'
+	fmt.Printf("DEBUG: parseGlobalVariable - semicolon consumed, now at token: %s (%s)\n", p.currentToken().Literal, p.currentToken().Type)
 
+	fmt.Printf("DEBUG: parseGlobalVariable - returning successfully\n")
 	return &node
 }

@@ -36,6 +36,12 @@ func main() {
 	if lexErr != nil {
 		log.Fatalf("Lexing failed: %v", lexErr)
 	}
+	
+	// Debug: Print all tokens
+	fmt.Printf("DEBUG: Generated %d tokens:\n", len(tokens))
+	for i, token := range tokens {
+		fmt.Printf("  %d: %s (%s) at line %d, col %d\n", i, token.Literal, token.Type, token.Line, token.Column)
+	}
 
 	// Parse the tokens
 	parser := parser.NewParser(tokens)  // Assuming parser.NewParser takes []lexer.Token
