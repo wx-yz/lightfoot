@@ -55,6 +55,19 @@ func (ctx *LLVMContext) CharPtrType() C.LLVMTypeRef {
 	return C.LLVMPointerType(int8Type, 0) // Address space 0
 }
 
+// Helper methods for creating constants
+func (ctx *LLVMContext) NewConstantInt(typ C.LLVMTypeRef, value int64) C.LLVMValueRef {
+	return C.LLVMConstInt(typ, C.ulonglong(value), 0) // 0 = not signed
+}
+
+func (ctx *LLVMContext) Int64Type() C.LLVMTypeRef {
+	return C.LLVMInt64TypeInContext(ctx.context)
+}
+
+func (ctx *LLVMContext) VoidType() C.LLVMTypeRef {
+	return C.LLVMVoidTypeInContext(ctx.context)
+}
+
 // LLVMModule wraps LLVM's LLVMModuleRef
 type LLVMModule struct {
 	module C.LLVMModuleRef
@@ -200,6 +213,28 @@ func (b *LLVMBuilder) NewLoad(ptr C.LLVMValueRef, name string) C.LLVMValueRef {
 // NewStore creates a new store instruction.
 func (b *LLVMBuilder) NewStore(val C.LLVMValueRef, ptr C.LLVMValueRef) C.LLVMValueRef {
 	return C.LLVMBuildStore(b.builder, val, ptr)
+}
+
+// NewAlloca creates a new alloca instruction.
+func (b *LLVMBuilder) NewAlloca(typ C.LLVMTypeRef, name string) C.LLVMValueRef {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	return C.LLVMBuildAlloca(b.builder, typ, cName)
+}
+
+// NewAdd creates a new add instruction.
+func (b *LLVMBuilder) NewAdd(lhs C.LLVMValueRef, rhs C.LLVMValueRef, name string) C.LLVMValueRef {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	return C.LLVMBuildAdd(b.builder, lhs, rhs, cName)
+}
+
+// NewRet creates a new return instruction.
+func (b *LLVMBuilder) NewRet(val C.LLVMValueRef) C.LLVMValueRef {
+	if val == nil {
+		return C.LLVMBuildRetVoid(b.builder)
+	}
+	return C.LLVMBuildRet(b.builder, val)
 }
 
 // LLVMTargetMachine wraps LLVM's LLVMTargetMachineRef

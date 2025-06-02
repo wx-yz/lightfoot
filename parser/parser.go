@@ -25,6 +25,8 @@ const (
 // precedences maps token types to their precedence levels.
 var precedences = map[lexer.TokenType]int{
 	lexer.TokenEqual:              Assignment,
+	lexer.TokenPlusEqual:          Assignment,
+	lexer.TokenMinusEqual:         Assignment,
 	lexer.TokenEqualEqual:         Equals,
 	lexer.TokenNotEqual:           Equals,
 	lexer.TokenLessThan:           LessGreater,
@@ -74,6 +76,8 @@ func NewParser(tokens []lexer.Token) *Parser {
 
 	p.infixParseFns = make(map[lexer.TokenType]infixParseFn)
 	p.registerInfix(lexer.TokenEqual, p.parseAssignmentExpression)
+	p.registerInfix(lexer.TokenPlusEqual, p.parseCompoundAssignmentExpression)
+	p.registerInfix(lexer.TokenMinusEqual, p.parseCompoundAssignmentExpression)
 	p.registerInfix(lexer.TokenPlus, p.parseInfixExpression)
 	p.registerInfix(lexer.TokenMinus, p.parseInfixExpression)
 	p.registerInfix(lexer.TokenSlash, p.parseInfixExpression)
@@ -623,6 +627,60 @@ func (p *Parser) parseAssignmentExpression(left Expression) Expression {
 		}
 		return nil
 	}
+	return assignNode
+}
+
+// parseCompoundAssignmentExpression handles compound assignment operators like += and -=
+func (p *Parser) parseCompoundAssignmentExpression(left Expression) Expression {
+	assignToken := p.currentToken() // Current token is '+=' or '-='
+
+	switch left.(type) {
+	case *IdentifierNode, *MemberAccessExpressionNode:
+		// Valid LValue for this subset
+	default:
+		p.errorUnexpectedToken(fmt.Sprintf("invalid assignment target, got %T", left), left.StartToken())
+		return nil
+	}
+
+	assignNode := &AssignmentExpressionNode{
+		Token:  assignToken,
+		Target: left,
+	}
+
+	assignPrecedence := p.currentPrecedence()
+	p.nextToken() // Consume '+=' or '-='
+
+	rhsStartToken := p.currentToken()
+	rightValue := p.parseExpression(assignPrecedence - 1)
+	if rightValue == nil {
+		if p.currentToken() == rhsStartToken {
+			p.errorUnexpectedToken(fmt.Sprintf("expected expression after '%s' in assignment", assignToken.Literal), rhsStartToken)
+		}
+		return nil
+	}
+
+	// Convert compound assignment to regular assignment with binary operation
+	// e.g., n += m becomes n = n + m
+	var binaryOp string
+	switch assignToken.Type {
+	case lexer.TokenPlusEqual:
+		binaryOp = "+"
+	case lexer.TokenMinusEqual:
+		binaryOp = "-"
+	default:
+		p.errorUnexpectedToken(fmt.Sprintf("unsupported compound assignment operator: %s", assignToken.Literal), assignToken)
+		return nil
+	}
+
+	// Create a binary expression: left + rightValue (or left - rightValue)
+	binaryExpr := &BinaryExpressionNode{
+		Token:    assignToken, // Use the compound operator token for error reporting
+		Left:     left,
+		Operator: binaryOp,
+		Right:    rightValue,
+	}
+
+	assignNode.Value = binaryExpr
 	return assignNode
 }
 

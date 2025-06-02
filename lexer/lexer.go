@@ -31,6 +31,8 @@ const (
 	TokenAsterisk           // *
 	TokenSlash              // /
 	TokenEqual              // =
+	TokenPlusEqual          // +=
+	TokenMinusEqual         // -=
 	TokenEqualEqual         // ==
 	TokenNotEqual           // !=
 	TokenLessThan           // <
@@ -104,6 +106,10 @@ func (t TokenType) String() string {
 		return "Slash"
 	case TokenEqual:
 		return "Equal"
+	case TokenPlusEqual:
+		return "PlusEqual"
+	case TokenMinusEqual:
+		return "MinusEqual"
 	case TokenEqualEqual:
 		return "EqualEqual"
 	case TokenNotEqual:
@@ -280,7 +286,20 @@ func (l *Lexer) readIdentifier() string {
 
 func (l *Lexer) readNumber() string {
 	startPos := l.pos
-	// Read initial digits
+
+	// Check for hexadecimal numbers (0x prefix)
+	if l.char == '0' && (l.peekChar() == 'x' || l.peekChar() == 'X') {
+		l.readChar() // consume '0'
+		l.readChar() // consume 'x' or 'X'
+		// Read hexadecimal digits
+		for isHexDigit(l.char) {
+			l.readChar()
+		}
+		// Return early for hex numbers - no decimal points or float suffixes allowed
+		return l.source[startPos:l.pos]
+	}
+
+	// Read initial digits (for decimal numbers)
 	for isDigit(l.char) {
 		l.readChar()
 	}
@@ -340,6 +359,10 @@ func isDigit(ch rune) bool {
 	return unicode.IsDigit(ch)
 }
 
+func isHexDigit(ch rune) bool {
+	return unicode.IsDigit(ch) || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
+}
+
 // Lex performs lexical analysis and returns a list of tokens.
 func (l *Lexer) Lex() ([]Token, error) {
 	var tokens []Token
@@ -384,12 +407,24 @@ func (l *Lexer) Lex() ([]Token, error) {
 			tok.Literal = "}"
 			l.readChar()
 		case '+':
-			tok.Type = TokenPlus
-			tok.Literal = "+"
+			if l.peekChar() == '=' {
+				l.readChar()
+				tok.Type = TokenPlusEqual
+				tok.Literal = "+="
+			} else {
+				tok.Type = TokenPlus
+				tok.Literal = "+"
+			}
 			l.readChar()
 		case '-':
-			tok.Type = TokenMinus
-			tok.Literal = "-"
+			if l.peekChar() == '=' {
+				l.readChar()
+				tok.Type = TokenMinusEqual
+				tok.Literal = "-="
+			} else {
+				tok.Type = TokenMinus
+				tok.Literal = "-"
+			}
 			l.readChar()
 		case '*':
 			tok.Type = TokenAsterisk
@@ -485,8 +520,13 @@ func (l *Lexer) Lex() ([]Token, error) {
 				}
 			} else if isDigit(l.char) || (l.char == '.' && isDigit(l.peekChar())) { // Modified condition
 				numberStr := l.readNumber()
+				// Debug: print what we got
+				fmt.Printf("DEBUG: lexer - numberStr: %q, contains .fF: %t\n", numberStr, strings.ContainsAny(numberStr, ".fF"))
 				// Determine if this is an int or float based on the literal
-				if strings.ContainsAny(numberStr, ".fF") {
+				// Hexadecimal numbers (starting with 0x or 0X) are always integers
+				if strings.HasPrefix(numberStr, "0x") || strings.HasPrefix(numberStr, "0X") {
+					tok.Type = TokenIntLiteral
+				} else if strings.ContainsAny(numberStr, ".fF") {
 					tok.Type = TokenFloatLiteral
 				} else {
 					tok.Type = TokenIntLiteral
