@@ -6,6 +6,7 @@ import (
 	"strings" // Ensure strings is imported
 	"unicode"
 	"unicode/utf8"
+	"wx-yz/lightfoot/debug"
 )
 
 // TokenType represents the type of a token.
@@ -521,7 +522,7 @@ func (l *Lexer) Lex() ([]Token, error) {
 			} else if isDigit(l.char) || (l.char == '.' && isDigit(l.peekChar())) { // Modified condition
 				numberStr := l.readNumber()
 				// Debug: print what we got
-				fmt.Printf("DEBUG: lexer - numberStr: %q, contains .fF: %t\n", numberStr, strings.ContainsAny(numberStr, ".fF"))
+				debug.PrintLexer("numberStr: %q, contains .fF: %t", numberStr, strings.ContainsAny(numberStr, ".fF"))
 				// Determine if this is an int or float based on the literal
 				// Hexadecimal numbers (starting with 0x or 0X) are always integers
 				if strings.HasPrefix(numberStr, "0x") || strings.HasPrefix(numberStr, "0X") {

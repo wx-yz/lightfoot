@@ -269,7 +269,8 @@ func (cg *CodeGenerator) AddRuntimeGlobals() {
 
 // AddRuntimeInit adds runtime initialization code
 func (cg *CodeGenerator) AddRuntimeInit() {
-	// Add any necessary runtime initialization code here
+	// Create a simple runtime initialization that doesn't print debug messages
+	// Remove any startup messages to prevent unwanted output
 }
 
 // Helper functions for runtime operations

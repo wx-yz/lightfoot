@@ -89,12 +89,9 @@ int wrapper_main(int argc, char** argv) {
     // Set up signal handler for debugging
     signal(SIGSEGV, signal_handler);
     
-    printf("Starting Ballerina program...\n");
-    
-    // Call Ballerina main with error handling
+    // Call Ballerina main without any debug output
     ballerina_main();
     
-    printf("Ballerina program completed successfully.\n");
     return 0;
 }
 

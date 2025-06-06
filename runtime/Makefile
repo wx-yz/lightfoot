@@ -7,9 +7,11 @@ HTTP_SERVER_OBJ := http_server.o
 GO_HTTP_LIB := http_server_go.a
 OBJS := runtime.o http_server.o $(GO_HTTP_LIB)
 
-.PHONY: all clean
+.PHONY: all clean rebuild
 
 all: $(OBJS)
+
+rebuild: clean all
 
 $(RUNTIME_OBJ): runtime.c runtime.h
 	$(CC) $(CFLAGS) -c -o $@ $<

@@ -64,29 +64,16 @@ func (cg *CodeGenerator) EnsureBallerinaMainFunction() {
 		if userMain, ok := cg.functions["_ballerina_main"]; ok {
 			mainBlock.NewCall(userMain)
 			fmt.Println("[DEBUG] Added call to _ballerina_main function from ballerina_main")
-
-			// Print success message
-			if printFunc != nil {
-				successMsg := cg.CreateString("Ballerina program completed successfully.", mainBlock)
-				mainBlock.NewCall(printFunc, successMsg)
-			}
 		}
 		mainBlock.NewBr(exitBlock)
 
 		// Exit block just returns
 		exitBlock.NewRet(nil)
 	} else {
-		// No init function, just call main directly and print success
+		// No init function, just call main directly
 		if userMain, ok := cg.functions["_ballerina_main"]; ok {
 			entryBlock.NewCall(userMain)
 			fmt.Println("[DEBUG] Added call to _ballerina_main function from ballerina_main without init")
-
-			// Print success message
-			printFunc := cg.functions["ballerina_io_println"]
-			if printFunc != nil {
-				successMsg := cg.CreateString("Ballerina program completed successfully.", entryBlock)
-				entryBlock.NewCall(printFunc, successMsg)
-			}
 		}
 		entryBlock.NewRet(nil)
 	}

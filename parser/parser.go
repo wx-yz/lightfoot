@@ -5,6 +5,7 @@ import (
 	"fmt" // Ensure fmt is imported
 	"strconv"
 	"strings"
+	"wx-yz/lightfoot/debug"
 	"wx-yz/lightfoot/lexer"
 )
 
@@ -173,7 +174,7 @@ func (p *Parser) currentPrecedence() int {
 // ParseFile is the entry point for parsing a Ballerina file.
 // MODIFIED to correctly populate fileNode.Imports
 func (p *Parser) ParseFile() (*FileNode, error) {
-	fmt.Printf("DEBUG: ParseFile started\n")
+	debug.PrintParser("ParseFile started")
 	fileNode := &FileNode{Token: p.currentToken()}
 	// Initialize slices to prevent nil pointer issues if file is empty
 	fileNode.Imports = []*ImportNode{}

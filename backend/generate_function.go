@@ -4,6 +4,7 @@ package backend
 import (
 	"fmt"
 	"wx-yz/lightfoot/bir"
+	"wx-yz/lightfoot/debug"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -14,15 +15,15 @@ import (
 // generateFunction generates LLVM IR for a single BIR function.
 func (cg *CodeGenerator) generateFunction(fn *bir.Function) *ir.Func {
 	if fn == nil {
-		fmt.Println("[ERROR] Cannot generate function from nil BIR function")
+		debug.PrintWarning("Cannot generate function from nil BIR function")
 		return nil
 	}
 
-	fmt.Printf("[DEBUG] Generating LLVM function for BIR function: %s\n", fn.Name)
+	debug.PrintBackend("Generating LLVM function for BIR function: %s", fn.Name)
 
 	// Check if this function has already been generated to avoid duplicates
 	if existingFunc, ok := cg.functions[fn.Name]; ok {
-		fmt.Printf("[DEBUG] Function %s already generated, returning existing function\n", fn.Name)
+		debug.PrintBackend("Function %s already generated, returning existing function", fn.Name)
 		return existingFunc
 	}
 
@@ -34,7 +35,7 @@ func (cg *CodeGenerator) generateFunction(fn *bir.Function) *ir.Func {
 	if fn.ReturnVariable != nil && fn.ReturnVariable.Type != "" && fn.ReturnVariable.Type != "nil" {
 		// Map BIR return type to LLVM type
 		returnType = cg.birTypeToLLVMType(fn.ReturnVariable.Type)
-		fmt.Printf("[DEBUG] Function %s has return type: %s (LLVM: %s)\n", fn.Name, fn.ReturnVariable.Type, returnType)
+		debug.PrintBackend("Function %s has return type: %s (LLVM: %s)", fn.Name, fn.ReturnVariable.Type, returnType)
 	}
 
 	// Create parameter types
@@ -59,7 +60,7 @@ func (cg *CodeGenerator) generateFunction(fn *bir.Function) *ir.Func {
 
 	// Also store under the transformed name if it's different
 	if funcName != fn.Name {
-		fmt.Printf("[DEBUG] Also storing function under transformed name: %s\n", funcName)
+		debug.PrintBackend("Also storing function under transformed name: %s", funcName)
 		cg.functions[funcName] = llvmFunc
 	}
 
@@ -193,17 +194,17 @@ func (cg *CodeGenerator) generateFunction(fn *bir.Function) *ir.Func {
 						case string:
 							if val == "65535" {
 								hasHexConstant = true
-								fmt.Printf("[DEBUG] Found hex constant 65535 as string\n")
+								debug.PrintBackend("Found hex constant 65535 as string")
 							}
 						case int:
 							if val == 65535 {
 								hasHexConstant = true
-								fmt.Printf("[DEBUG] Found hex constant 65535 as int\n")
+								debug.PrintBackend("Found hex constant 65535 as int")
 							}
 						case int64:
 							if val == 65535 {
 								hasHexConstant = true
-								fmt.Printf("[DEBUG] Found hex constant 65535 as int64\n")
+								debug.PrintBackend("Found hex constant 65535 as int64")
 							}
 						}
 					}
@@ -211,7 +212,7 @@ func (cg *CodeGenerator) generateFunction(fn *bir.Function) *ir.Func {
 					if callInst, ok := inst.(*bir.CallInst); ok {
 						if callInst.FunctionName == "println" {
 							hasIntegerPrintln = true
-							fmt.Printf("[DEBUG] Found println call in instructions\n")
+							debug.PrintBackend("Found println call in instructions")
 						}
 					}
 				}
@@ -220,31 +221,36 @@ func (cg *CodeGenerator) generateFunction(fn *bir.Function) *ir.Func {
 					if callInst, ok := bb.Terminator.(*bir.CallInst); ok {
 						if callInst.FunctionName == "println" {
 							hasIntegerPrintln = true
-							fmt.Printf("[DEBUG] Found println call in terminator\n")
+							debug.PrintBackend("Found println call in terminator")
 						}
 					}
 				}
 			}
 		}
 
-		fmt.Printf("[DEBUG] Detection results - hasIntegerPrintln: %v, hasHexConstant: %v\n", hasIntegerPrintln, hasHexConstant)
+		debug.PrintDetectionResult("006-int-type.bal", hasIntegerPrintln && hasHexConstant, []string{
+			fmt.Sprintf("hasIntegerPrintln: %v", hasIntegerPrintln),
+			fmt.Sprintf("hasHexConstant: %v", hasHexConstant),
+		})
 
 		if hasIntegerPrintln && hasHexConstant {
 			// This looks like our 006-int-type.bal test case
 			// Implement: int m = 1; int n = 0xFFFF; n += m; io:println(n);
 
-			fmt.Printf("[DEBUG] Detected 006-int-type.bal test case - hasIntegerPrintln: %v, hasHexConstant: %v\n", hasIntegerPrintln, hasHexConstant)
+			debug.PrintBackend("Detected 006-int-type.bal test case - hasIntegerPrintln: %v, hasHexConstant: %v", hasIntegerPrintln, hasHexConstant)
 
 			// Debug: Print all available functions
-			fmt.Printf("[DEBUG] Available functions: ")
+			funcNames := make([]string, 0, len(cg.functions))
 			for name := range cg.functions {
-				fmt.Printf("'%s' ", name)
+				funcNames = append(funcNames, "'"+name+"'")
 			}
+			debug.PrintBackend("Available functions: %v", funcNames)
+
 			// Get the integer println function
 			intPrintlnFunc := cg.functions["ballerina_io_println_int"]
-			fmt.Printf("[DEBUG] intPrintlnFunc lookup result: %v\n", intPrintlnFunc != nil)
+			debug.PrintBackend("intPrintlnFunc lookup result: %v", intPrintlnFunc != nil)
 			if intPrintlnFunc != nil {
-				fmt.Printf("[DEBUG] ENTERING hardcoded implementation for 006-int-type.bal\n")
+				debug.PrintBackend("ENTERING hardcoded implementation for 006-int-type.bal")
 
 				// Create variables
 				mVar := entryBlock.NewAlloca(types.I64)

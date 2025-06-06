@@ -4,6 +4,7 @@ package bir
 import (
 	"fmt"
 	"strings"
+	"wx-yz/lightfoot/debug"
 	"wx-yz/lightfoot/lexer"
 	"wx-yz/lightfoot/parser" // Assuming parser.IdentifierNode might be checked, etc.
 	// "sort" // If sorting variables for printing
@@ -375,11 +376,11 @@ func (e *Emitter) addInstruction(inst Instruction) {
 	if e.currentFunc.CurrentBB.Terminator != nil {
 		// This indicates a logic error in CFG construction by the emitter.
 		// A new BB should have been created and set as current if the previous one was terminated.
-		fmt.Printf("Warning: Adding instruction '%s' to already terminated BB %s. This instruction might be dead code.\n", inst.String(), e.currentFunc.CurrentBB.ID)
+		debug.Log(debug.CategoryBIR, "Warning: Adding instruction '%s' to already terminated BB %s. This instruction might be dead code.", inst.String(), e.currentFunc.CurrentBB.ID)
 		// Optionally, create a new "unreachable" BB, but this masks the underlying issue.
 		// For now, allow adding, but it's a sign of trouble.
 	}
-	fmt.Printf("[DEBUG] Adding instruction to %s: %s\n", e.currentFunc.CurrentBB.ID, inst.String())
+	debug.Log(debug.CategoryBIR, "Adding instruction to %s: %s", e.currentFunc.CurrentBB.ID, inst.String())
 	e.currentFunc.CurrentBB.Instructions = append(e.currentFunc.CurrentBB.Instructions, inst)
 }
 

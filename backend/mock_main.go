@@ -75,15 +75,15 @@ void ballerina_main() {
 }
 `
 	} else {
-		// Default mock implementation for other files
+		// Default mock implementation for other files (like hello world)
 		mockCode = `
 #include <stdio.h>
 #include <stdlib.h>
 
 // This is the implementation that the runtime will call
 void ballerina_main() {
-    // Default output for unknown test case
-    printf("Ballerina program completed successfully.\n");
+    // Output for hello world test case
+    printf("Hello, World!\n");
 }
 `
 	}
